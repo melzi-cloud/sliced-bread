@@ -237,7 +237,7 @@ func deployment(a *App, p Params, ns string, lbl map[string]string, image string
 		"readinessProbe":  probe,
 		"securityContext": Obj{
 			"allowPrivilegeEscalation": false,
-			"capabilities":             Obj{"drop": []any{"ALL"}},
+			"capabilities":             capabilities(a),
 		},
 		"resources": Obj{
 			"requests": Obj{"cpu": "50m", "memory": "64Mi"},
@@ -286,6 +286,18 @@ func deployment(a *App, p Params, ns string, lbl map[string]string, image string
 	return dep, nil
 }
 
+// rootCaps is what a container running as root keeps: enough for common images
+// (nginx, Postgres, s6-based images) to switch users and fix file ownership.
+// It is Docker's default set without NET_RAW, MKNOD, SYS_CHROOT, SETPCAP, SETFCAP and AUDIT_WRITE.
+var rootCaps = []any{"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "KILL", "NET_BIND_SERVICE"}
+
+func capabilities(a *App) Obj {
+	if a.RunAsUser > 0 {
+		return Obj{"drop": []any{"ALL"}}
+	}
+	return Obj{"drop": []any{"ALL"}, "add": rootCaps}
+}
+
 func configHash(a *App, image, secretVersion string) string {
 	b, _ := json.Marshal(struct {
 		Env    map[string]string
@@ -295,4 +307,38 @@ func configHash(a *App, image, secretVersion string) string {
 	}{a.Env, a.SecretKeys, image, secretVersion})
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:8])
+}
+
+var internalRefRE = regexp.MustCompile(`\$\{apps\.([a-z0-9-]+)\.internal\}`)
+
+// InternalRefs returns the apps this app calls through ${apps.<name>.internal}.
+func InternalRefs(a *App) []string {
+	seen := map[string]bool{}
+	for _, v := range a.Env {
+		for _, m := range internalRefRE.FindAllStringSubmatch(v, -1) {
+			if m[1] != a.Name {
+				seen[m[1]] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// AllowFromLabel marks NetworkPolicies that admit traffic from another app.
+const AllowFromLabel = "slicedbread.dev/allow-from"
+
+// AllowFromPolicy admits traffic from app `from` into app `to`'s namespace.
+func AllowFromPolicy(from, to string) Obj {
+	np := meta("NetworkPolicy", "networking.k8s.io/v1", Namespace(to), "allow-from-app-"+from, map[string]string{AppLabel: to, AllowFromLabel: from})
+	np["spec"] = Obj{
+		"podSelector": Obj{},
+		"policyTypes": []any{"Ingress"},
+		"ingress":     []any{Obj{"from": []any{Obj{"namespaceSelector": Obj{"matchLabels": Obj{"kubernetes.io/metadata.name": Namespace(from)}}}}}},
+	}
+	return np
 }

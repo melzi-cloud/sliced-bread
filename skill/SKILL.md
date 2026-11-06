@@ -45,7 +45,7 @@ App names: 2 to 30 lowercase letters, digits or dashes, starting with a letter. 
 - Needs Postgres? Add `--database`: a Postgres database is created next to the app and `DATABASE_URL` is set (a `postgresql://` URL).
 - Has a health endpoint? Add `--health-path /healthz` so a new version only takes traffic once it answers there (default: the port accepts connections).
 - `--dir` skips `node_modules`, `.git`, `dist`, `build`, `.next`, `.venv`, `target` and similar folders. Everything else is uploaded, including `.env` files, because Vite and similar tools read them at build time. Do not keep server-side secrets in uploaded files; use `sb env set --secrets-stdin`. Preview the file list with `--dry-run`. A `.dockerignore` in the project is respected by the build. You do not need to build locally.
-- `sb status <app>` shows the sha256 of the uploaded source and the build id serving. `sb deploy <app> --dir <path> --dry-run` prints the sha256 of the folder as it is now, so you can tell whether a local folder matches what is deployed. The app name can differ from the folder name.
+- `sb status <app>` shows the content sha256 of the uploaded source and the build id serving. `sb deploy <app> --dir <path> --dry-run` prints the content sha256 of the folder as it is now (file contents only, timestamps ignored). Equal hashes mean the deployed source matches the folder. The app name can differ from the folder name.
 - To ship code changes: `sb redeploy <app> --dir <path>` (or `sb redeploy <app>` for a repo, which pulls the latest commit). The previous version keeps serving until the new build is ready.
 - If a build fails: `sb logs <app> --build` shows the clone, plan and build output.
 
@@ -73,12 +73,21 @@ When you see exit code 3:
 
 1. Tell the user what you requested and give them the `approve at:` URL from the output.
 2. Do not try to work around it (for example by redeploying under another name or with another mode). You cannot approve; `sb approve` is for humans with an admin token.
-3. Wait with `sb approvals --wait <id>` (blocks until a human decides, default timeout 30 minutes), or stop and report. Once approved, the change applies automatically. `sb status <app>` lists pending approvals for the app.
+3. Wait with `sb approvals --wait <id> [--timeout 30m]`. It exits 0 when approved, 1 when denied or obsolete, and 3 if still pending at the timeout. Or stop and report. `sb approvals --app <app>` lists one app's approvals. Once approved, the change applies automatically. `sb status <app>` lists pending approvals for the app.
 4. If the app changes or is deleted before approval, the approval becomes obsolete and must be requested again.
 
 ### How the wall answers
 
 A request without a SlicedBread session gets a `302` redirect to the login page if it looks like a browser (`Accept: text/html`), otherwise `401`. Both mean the wall works. To see the app's content, use `sb check`.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | OK |
+| 1 | Error: includes a failed build, a denied or obsolete approval, and `sb check --contains` not finding the text |
+| 2 | Usage error (`sb <command> --help` shows the full usage) |
+| 3 | Waiting for human approval, including `sb approvals --wait` timing out |
 
 ## Configuration
 
@@ -92,7 +101,7 @@ sb env unset <app> KEY
 Values can reference:
 - `${app.url}`: this app's public URL
 - `${apps.<other>.url}`: another app's public URL
-- `${apps.<other>.internal}`: another app's in-cluster URL (no login wall), e.g. for an API backend
+- `${apps.<other>.internal}`: another app's in-cluster URL (no login wall), e.g. for an API backend. Referencing it is what allows the traffic: apps can only reach apps they reference this way.
 - `${secret.NAME}`: a secret value, must be the whole value
 
 Never put secrets on the command line or in plain `--env` values. Use `--secrets-stdin`.
@@ -122,7 +131,7 @@ sb action analytics create_website --input name="My App" --input domain=myapp.<t
 # output includes "snippet": a <script> tag
 ```
 
-Then add the snippet inside `<head>` of the app's HTML (for Vite/React/Lovable projects: `index.html` at the project root), ship it with `sb redeploy myapp --dir <path>`, run `sb wait myapp`, and verify with `sb check myapp --contains data-website-id`. `sb action analytics stats` shows page views per website for the last 24 hours.
+Then add the snippet inside `<head>` of the app's HTML (for Vite/React/Lovable projects: `index.html` at the project root), ship it with `sb redeploy myapp --dir <path>`, run `sb wait myapp`, and verify with `sb check myapp --contains data-website-id`. Confirm events are counted with `sb action analytics test_event` (adds one page view at `/sb-test-event`, tell the user), and read counts with `sb action analytics stats`.
 
 Tell the user two things:
 - If the tracked app is behind the wall, only signed-in team members' visits are counted. Real visitor numbers need the app to be `public` (`sb access myapp public`, needs approval). Do not request that unless the user wants it.
@@ -138,7 +147,7 @@ sb approvals --wait <id>            # once approved, the user registers at the a
 sb settings vault signups=false     # after the account exists (no approval needed to close)
 ```
 
-Signups close automatically 15 minutes after opening. To narrow who can register, also set `signup_domain=<company domain>` (for example `sb settings vault signups=true signup_domain=acme.com`).
+Signups close automatically 15 minutes after the change is applied (that is, after the human approves), so tell the user to register right away. To narrow who can register, also set `signup_domain=<company domain>` (for example `sb settings vault signups=true signup_domain=acme.com`).
 
 Tell the user: in the Bitwarden app or browser extension, choose "Self-hosted" and enter the app URL.
 

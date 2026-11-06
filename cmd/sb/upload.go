@@ -4,8 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +13,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/melzi-cloud/sliced-bread/internal/apps"
 )
 
 // skipDirs are never uploaded: dependencies, build output, VCS and tool state.
@@ -159,9 +159,12 @@ func listUpload(root string) error {
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(data)
-	fmt.Printf("%d files, %d KB compressed, sha256 %s (skipped: %s)\n", len(files), len(data)/1024, hex.EncodeToString(sum[:])[:12], skipList())
-	fmt.Println("note: the sha256 matches the deployed source only if no file changed; timestamps are included.")
+	sum, err := apps.ContentHash(bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%d files, %d KB compressed, content sha256 %s (skipped: %s)\n", len(files), len(data)/1024, sum, skipList())
+	fmt.Println("note: compare with the content sha256 in `sb status <app>`; equal means the deployed source matches this folder (timestamps ignored).")
 	return nil
 }
 

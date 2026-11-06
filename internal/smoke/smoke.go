@@ -90,6 +90,12 @@ func Run(ctx context.Context, p *tenant.Provisioner, opts Options) (res Result, 
 	if err = checkFirewall(ctx, st); err != nil {
 		return res, err
 	}
+	if err = checkMetadataBlocked(ctx, st); err != nil {
+		return res, err
+	}
+	if err = checkPlacement(ctx, p, st); err != nil {
+		return res, err
+	}
 	p.Logf("[%s] smoke checks passed for https://%s", runID, res.Host)
 	return res, nil
 }
@@ -313,4 +319,36 @@ func pollUntil(ctx context.Context, timeout, every time.Duration, f func(context
 		case <-time.After(every):
 		}
 	}
+}
+
+// checkMetadataBlocked confirms pods cannot read Hetzner user data (join token, host keys).
+func checkMetadataBlocked(ctx context.Context, st *tenant.State) error {
+	out, err := st.Kubectl(ctx, `-n smoke run metadata-probe --rm -i --restart=Never --image=busybox:1.38.0 `+
+		`--overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"metadata-probe","image":"busybox:1.38.0","command":["sh","-c","wget -T 3 -qO- http://169.254.169.254/hetzner/v1/userdata >/dev/null 2>&1 && echo REACHABLE || echo BLOCKED"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'`, nil)
+	if err != nil {
+		return fmt.Errorf("metadata probe: %w", err)
+	}
+	if !strings.Contains(string(out), "BLOCKED") {
+		return fmt.Errorf("pods can read the Hetzner metadata service: %q", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// checkPlacement confirms every server is in the run's spread placement group.
+func checkPlacement(ctx context.Context, p *tenant.Provisioner, st *tenant.State) error {
+	groups := map[int64]bool{}
+	for _, n := range st.Nodes {
+		srv, _, err := p.HC.Server.GetByID(ctx, n.ID)
+		if err != nil || srv == nil {
+			return fmt.Errorf("get %s: %v", n.Name, err)
+		}
+		if srv.PlacementGroup == nil || srv.PlacementGroup.Type != "spread" {
+			return fmt.Errorf("%s is not in a spread placement group", n.Name)
+		}
+		groups[srv.PlacementGroup.ID] = true
+	}
+	if len(groups) != 1 {
+		return fmt.Errorf("servers are in %d placement groups, want 1", len(groups))
+	}
+	return nil
 }

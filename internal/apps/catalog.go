@@ -78,6 +78,8 @@ var Catalog = map[string]*Template{
 				Description: "Register a website and return the tracking snippet to add to its HTML <head>.",
 				Input:       map[string]string{"name": "display name", "domain": "site domain without scheme, e.g. shop.example.com"},
 			},
+			{Name: "test_event", Description: "Send one labelled test page view (path /sb-test-event) to a website and confirm Umami counted it.",
+				Input: map[string]string{"website_id": "optional when there is only one website"}},
 			{Name: "stats", Description: "Page views and visitors per website over the last 24 hours. Use it to verify tracking works.",
 				Input: map[string]string{"hours": "optional, look-back window in hours (default 24)"}},
 			{Name: "dashboard_login", Description: "Return the Umami dashboard username and password (human use).", AdminOnly: true},
@@ -86,7 +88,7 @@ var Catalog = map[string]*Template{
 			"The tracker script (/script.js) and event endpoint (/api/send) are public so websites can report visits. " +
 			"Use the create_website action to get a snippet; do not create sites through the UI. " +
 			"If the tracked app is behind the wall, only signed-in team members' visits are counted. " +
-			"Umami ignores requests with bot user agents, so test events need a browser user agent. Check counts with the stats action.",
+			"Verify tracking with the test_event action (it adds one page view at /sb-test-event) and read counts with the stats action.",
 		apply: func(a *App) {
 			a.Image = "ghcr.io/umami-software/umami:3.4.1"
 			a.Port = 3000

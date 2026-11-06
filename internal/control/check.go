@@ -48,7 +48,13 @@ func (s *Server) apiCheck(w http.ResponseWriter, r *http.Request) {
 	req.Host = apps.Host(a.Name, s.cfg.Domain)
 	req.Header.Set("Accept", "text/html,*/*")
 	req.Header.Set("X-Sb-User", "sb-check")
-	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	// A fresh connection per check: a kept-alive connection would stay pinned to a pod
+	// that is shutting down after a rollout and keep returning the old version.
+	client := &http.Client{
+		Timeout:       15 * time.Second,
+		Transport:     &http.Transport{DisableKeepAlives: true},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		fail(w, 502, "app did not respond: "+err.Error(), "check state with: sb status "+a.Name+" and logs with: sb logs "+a.Name)

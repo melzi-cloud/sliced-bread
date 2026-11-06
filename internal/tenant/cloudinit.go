@@ -46,6 +46,16 @@ write_files:
     owner: root:root
     content: |
 {{indent 6 .Registries}}
+  - path: /etc/sb/metadata-block.nft
+    permissions: "0644"
+    owner: root:root
+    content: |
+{{indent 6 .MetadataBlock}}
+  - path: /etc/systemd/system/sb-metadata-block.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+{{indent 6 .MetadataUnit}}
   - path: /etc/sb/k3s-token
     permissions: "0600"
     owner: root:root
@@ -81,10 +91,13 @@ if [ -z "$PRIV_IF" ]; then echo "private network interface not found"; exit 1; f
 PRIV_IP=$(ip -4 -o addr show dev "$PRIV_IF" | awk '$4 ~ /^10\.0\./ {split($4,a,"/"); print a[1]; exit}')
 echo "private interface $PRIV_IF $PRIV_IP"
 
-if ! command -v curl >/dev/null; then
+if ! command -v curl >/dev/null || ! command -v nft >/dev/null; then
   apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl nftables
 fi
+# Pods must not reach the Hetzner metadata service: user data holds the join token and host keys.
+systemctl daemon-reload
+systemctl enable --now sb-metadata-block.service
 
 curl -sfL --retry 5 https://get.k3s.io -o /root/k3s-install.sh
 export INSTALL_K3S_VERSION={{sq .K3sVersion}}
@@ -124,9 +137,11 @@ func RenderUserData(c NodeConfig) (string, error) {
 	var out bytes.Buffer
 	err := userDataTmpl.Execute(&out, struct {
 		NodeConfig
-		Script     string
-		Registries string
-	}{c, script.String(), registriesYAML})
+		Script        string
+		Registries    string
+		MetadataBlock string
+		MetadataUnit  string
+	}{c, script.String(), registriesYAML, metadataBlockNft, metadataBlockUnit})
 	if err != nil {
 		return "", err
 	}
@@ -135,6 +150,36 @@ func RenderUserData(c NodeConfig) (string, error) {
 	}
 	return out.String(), nil
 }
+
+// PodCIDR is the k3s default cluster CIDR.
+const PodCIDR = "10.42.0.0/16"
+
+// metadataBlockNft drops pod traffic to the Hetzner metadata service. Pod traffic to
+// 169.254.169.254 is routed through the host, so it passes the forward hook; host
+// processes (cloud-init, k3s, host-network pods) are unaffected.
+const metadataBlockNft = `table inet sb_metadata
+delete table inet sb_metadata
+table inet sb_metadata {
+  chain forward {
+    type filter hook forward priority -5; policy accept;
+    ip saddr ` + PodCIDR + ` ip daddr 169.254.169.254 counter drop
+  }
+}
+`
+
+const metadataBlockUnit = `[Unit]
+Description=Block pod access to the Hetzner metadata service
+Before=k3s.service
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/sb/metadata-block.nft
+
+[Install]
+WantedBy=multi-user.target
+`
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

@@ -83,6 +83,8 @@ spec:
   version: {{.HcloudCSIVersion}}
   targetNamespace: kube-system
   valuesContent: |-
+    node:
+      hostNetwork: true   # reads Hetzner metadata from the node; pod CIDR traffic to metadata is dropped
     controller:
       hcloudVolumeDefaultLocation: {{.Location}}
       volumeExtraLabels:

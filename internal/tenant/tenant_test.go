@@ -28,6 +28,7 @@ func TestRenderUserDataInit(t *testing.T) {
 		"#cloud-config", "ed25519_private: |", "    -----BEGIN OPENSSH PRIVATE KEY-----",
 		"--cluster-init", "INSTALL_K3S_VERSION='v1.37.2+k3s1'", "--disable servicelb", "--disable local-storage",
 		"/var/lib/rancher/k3s/server/manifests/sb-traefik-config.yaml", "nodePort: 30443", "--token-file /etc/sb/k3s-token", "/etc/rancher/k3s/registries.yaml", "http://10.43.200.200:5000",
+		"ip saddr 10.42.0.0/16 ip daddr 169.254.169.254 counter drop", "systemctl enable --now sb-metadata-block.service", "ExecStart=/usr/sbin/nft -f /etc/sb/metadata-block.nft",
 	} {
 		if !strings.Contains(ud, want) {
 			t.Errorf("user data missing %q", want)
@@ -71,7 +72,7 @@ func TestManifests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"version: v1.21.3", "version: 2.24.1", `sb/run-id: "rabcdefg"`, `sb/expires-at: "1800000000"`, "hcloudVolumeDefaultLocation: nbg1"} {
+	for _, want := range []string{"version: v1.21.3", "version: 2.24.1", "hostNetwork: true", `sb/run-id: "rabcdefg"`, `sb/expires-at: "1800000000"`, "hcloudVolumeDefaultLocation: nbg1"} {
 		if !strings.Contains(charts, want) {
 			t.Errorf("charts missing %q", want)
 		}

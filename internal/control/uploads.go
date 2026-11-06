@@ -22,7 +22,7 @@ func (s *Server) uploadPath(id string) string {
 	return filepath.Join(s.cfg.DataDir, "uploads", id+".tar.gz")
 }
 
-// uploadInfo returns size and short sha256 of an upload.
+// uploadInfo returns size and the content hash of an upload.
 func (s *Server) uploadInfo(id string) (*apps.Upload, bool) {
 	size, ok := s.uploadSize(id)
 	if !ok {
@@ -33,9 +33,11 @@ func (s *Server) uploadInfo(id string) (*apps.Upload, bool) {
 		return nil, false
 	}
 	defer f.Close()
-	h := sha256.New()
-	io.Copy(h, f)
-	return &apps.Upload{ID: id, Bytes: size, SHA256: hex.EncodeToString(h.Sum(nil))[:12]}, true
+	sum, err := apps.ContentHash(f)
+	if err != nil {
+		return nil, false
+	}
+	return &apps.Upload{ID: id, Bytes: size, SHA256: sum}, true
 }
 
 func (s *Server) uploadSize(id string) (int64, bool) {

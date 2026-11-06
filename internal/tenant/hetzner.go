@@ -160,6 +160,17 @@ func (p *Provisioner) Up(ctx context.Context, runID string) (*State, error) {
 	if err := p.HC.Action.WaitFor(ctx, fwRes.Actions...); err != nil {
 		return st, fmt.Errorf("firewall actions: %w", err)
 	}
+	// Spread placement: every server on a different physical host, so one hardware
+	// failure cannot take down etcd quorum. Hetzner allows 10 servers per spread group.
+	pgRes, _, err := p.HC.PlacementGroup.Create(ctx, hcloud.PlacementGroupCreateOpts{Name: name, Labels: base, Type: hcloud.PlacementGroupTypeSpread})
+	if err != nil {
+		return st, fmt.Errorf("create placement group: %w", err)
+	}
+	if pgRes.Action != nil {
+		if err := p.HC.Action.WaitFor(ctx, pgRes.Action); err != nil {
+			return st, fmt.Errorf("placement group action: %w", err)
+		}
+	}
 
 	token := randomToken()
 	createNode := func(i int, joinAddr string) (Node, error) {
@@ -177,16 +188,17 @@ func (p *Provisioner) Up(ctx context.Context, runID string) (*State, error) {
 		}
 		nodeName := fmt.Sprintf("%s-s%d", name, i)
 		res, _, err := p.HC.Server.Create(ctx, hcloud.ServerCreateOpts{
-			Name:       nodeName,
-			ServerType: &hcloud.ServerType{Name: c.ServerType},
-			Image:      &hcloud.Image{Name: c.Image},
-			Location:   &hcloud.Location{Name: c.Location},
-			SSHKeys:    []*hcloud.SSHKey{sshKey},
-			UserData:   ud,
-			Labels:     labels.With(base, labels.Role, "server"),
-			Networks:   []*hcloud.Network{network},
-			Firewalls:  []*hcloud.ServerCreateFirewall{{Firewall: *fwRes.Firewall}},
-			PublicNet:  &hcloud.ServerCreatePublicNet{EnableIPv4: true, EnableIPv6: true},
+			Name:           nodeName,
+			ServerType:     &hcloud.ServerType{Name: c.ServerType},
+			Image:          &hcloud.Image{Name: c.Image},
+			Location:       &hcloud.Location{Name: c.Location},
+			SSHKeys:        []*hcloud.SSHKey{sshKey},
+			UserData:       ud,
+			Labels:         labels.With(base, labels.Role, "server"),
+			Networks:       []*hcloud.Network{network},
+			Firewalls:      []*hcloud.ServerCreateFirewall{{Firewall: *fwRes.Firewall}},
+			PlacementGroup: pgRes.PlacementGroup,
+			PublicNet:      &hcloud.ServerCreatePublicNet{EnableIPv4: true, EnableIPv6: true},
 		})
 		if err != nil {
 			return Node{}, fmt.Errorf("create %s: %w", nodeName, err)
@@ -293,7 +305,44 @@ func (p *Provisioner) Up(ctx context.Context, runID string) (*State, error) {
 	if err := p.waitK3s(ctx, st); err != nil {
 		return st, err
 	}
+	if err := p.rotateToken(ctx, st); err != nil {
+		return st, fmt.Errorf("rotate k3s token: %w", err)
+	}
 	return st, nil
+}
+
+// rotateToken replaces the k3s join token that was delivered in user data, so the
+// copy left in the metadata service is useless. Each server is restarted with the
+// new token one at a time, waiting for it to be Ready, so etcd keeps quorum.
+func (p *Provisioner) rotateToken(ctx context.Context, st *State) error {
+	p.Logf("[%s] rotating the k3s join token", st.RunID)
+	newTok := randomToken()
+	t0, err := st.Target(0)
+	if err != nil {
+		return err
+	}
+	// The new token arrives on stdin, never in our command line or logs.
+	if _, err := t0.Run(ctx, `NEW=$(cat) && k3s token rotate --token "$(cat /etc/sb/k3s-token)" --new-token "$NEW" >/dev/null`, strings.NewReader(newTok)); err != nil {
+		return err
+	}
+	for i, n := range st.Nodes {
+		t, err := st.Target(i)
+		if err != nil {
+			return err
+		}
+		if _, err := t.Run(ctx, `umask 077 && cat > /etc/sb/k3s-token.new && mv /etc/sb/k3s-token.new /etc/sb/k3s-token && systemctl restart k3s`, strings.NewReader(newTok)); err != nil {
+			return fmt.Errorf("restart %s with new token: %w", n.Name, err)
+		}
+		name := n.Name
+		err = poll(ctx, 5*time.Minute, 5*time.Second, func(ctx context.Context) (bool, error) {
+			out, err := t0.Run(ctx, "k3s kubectl get node "+name+" --no-headers 2>/dev/null | awk '{print $2}'", nil)
+			return err == nil && strings.TrimSpace(string(out)) == "Ready", nil
+		})
+		if err != nil {
+			return fmt.Errorf("%s not Ready after token rotation: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // waitK3s waits for SSH, cloud-init, and all nodes Ready.
@@ -418,6 +467,13 @@ func (p *Provisioner) Inventory(ctx context.Context, selector string) ([]Resourc
 	for _, x := range keys {
 		add("ssh_key", x.ID, x.Name, x.Labels)
 	}
+	pgs, err := p.HC.PlacementGroup.AllWithOpts(ctx, hcloud.PlacementGroupListOpts{ListOpts: lo})
+	if err != nil {
+		return nil, err
+	}
+	for _, x := range pgs {
+		add("placement_group", x.ID, x.Name, x.Labels)
+	}
 	ips, err := p.HC.PrimaryIP.AllWithOpts(ctx, hcloud.PrimaryIPListOpts{ListOpts: lo})
 	if err != nil {
 		return nil, err
@@ -476,7 +532,7 @@ func runFromName(name, testDomain string) string {
 }
 
 // deleteOrder is the order resources must be removed in.
-var deleteOrder = map[string]int{"load_balancer": 0, "server": 1, "volume": 2, "primary_ip": 2, "dns_record": 2, "firewall": 3, "network": 4, "ssh_key": 5}
+var deleteOrder = map[string]int{"load_balancer": 0, "server": 1, "volume": 2, "primary_ip": 2, "dns_record": 2, "placement_group": 3, "firewall": 3, "network": 4, "ssh_key": 5}
 
 // Down deletes every resource belonging to runID and verifies nothing remains.
 func (p *Provisioner) Down(ctx context.Context, runID string) error {
@@ -529,6 +585,8 @@ func (p *Provisioner) deleteAll(ctx context.Context, res []Resource) error {
 			_, err = p.HC.Volume.Delete(ctx, &hcloud.Volume{ID: id})
 		case "primary_ip":
 			_, err = p.HC.PrimaryIP.Delete(ctx, &hcloud.PrimaryIP{ID: id})
+		case "placement_group":
+			_, err = p.HC.PlacementGroup.Delete(ctx, &hcloud.PlacementGroup{ID: id})
 		case "firewall":
 			_, err = p.HC.Firewall.Delete(ctx, &hcloud.Firewall{ID: id})
 		case "network":

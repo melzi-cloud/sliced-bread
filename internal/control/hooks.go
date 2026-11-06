@@ -172,6 +172,66 @@ func (s *Server) runAction(ctx context.Context, a *apps.App, action string, inpu
 			"snippet":    fmt.Sprintf(`<script defer src="%s" data-website-id="%s"></script>`, script, site.ID),
 			"next":       "Add the snippet inside <head> of the site (for a Vite/React app: index.html), then redeploy that app.",
 		}, nil
+	case "umami/test_event":
+		if a.Hooks["admin-password"] != "set" {
+			return nil, fmt.Errorf("umami is still starting; run `sb wait %s` and retry", a.Name)
+		}
+		vals, err := s.appSecret(ctx, a)
+		if err != nil {
+			return nil, err
+		}
+		login, err := umamiLoginAs(ctx, a, vals["UMAMI_ADMIN_PASSWORD"])
+		if err != nil {
+			return nil, fmt.Errorf("umami login: %w", err)
+		}
+		var sites struct {
+			Data []struct{ ID, Name, Domain string } `json:"data"`
+		}
+		if err := getJSON(ctx, internalURL(a)+"/api/websites", login.Token, &sites); err != nil {
+			return nil, err
+		}
+		id := strings.TrimSpace(input["website_id"])
+		host := ""
+		for _, w := range sites.Data {
+			if id == "" && len(sites.Data) == 1 || w.ID == id {
+				id, host = w.ID, w.Domain
+			}
+		}
+		if host == "" {
+			return nil, fmt.Errorf("pass --input website_id=<id> (there are %d websites; see the stats action)", len(sites.Data))
+		}
+		count := func() float64 {
+			var st map[string]any
+			end := time.Now().Add(time.Minute)
+			u := fmt.Sprintf("%s/api/websites/%s/stats?startAt=%d&endAt=%d", internalURL(a), id, end.Add(-24*time.Hour).UnixMilli(), end.UnixMilli())
+			if getJSON(ctx, u, login.Token, &st) != nil {
+				return -1
+			}
+			f, _ := statNum(st["pageviews"]).(float64)
+			return f
+		}
+		before := count()
+		body, _ := json.Marshal(map[string]any{"type": "event", "payload": map[string]any{
+			"website": id, "hostname": host, "url": "/sb-test-event", "title": "SlicedBread test event", "language": "en-US", "screen": "1920x1080",
+		}})
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, internalURL(a)+"/api/send", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36 SlicedBread-test")
+		resp, err := hookHTTP.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("send event: %w", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("umami rejected the event: HTTP %d", resp.StatusCode)
+		}
+		after := before
+		for i := 0; i < 10 && after <= before; i++ {
+			time.Sleep(time.Second)
+			after = count()
+		}
+		return map[string]any{"website_id": id, "domain": host, "pageviews_before": before, "pageviews_after": after,
+			"counted": after > before, "note": "one page view at /sb-test-event was added to this website's stats"}, nil
 	case "umami/stats":
 		if a.Hooks["admin-password"] != "set" {
 			return nil, fmt.Errorf("umami is still starting; run `sb wait %s` and retry", a.Name)

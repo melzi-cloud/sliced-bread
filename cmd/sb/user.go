@@ -70,11 +70,12 @@ Operate
   sb delete <app>
 
 Approvals (privileged changes requested by agents)
-  sb approvals [--wait <id>] [--timeout 30m]   list, or block until a human decides
+  sb approvals [--app <app>] [--wait <id>] [--timeout 30m]   list (optionally one app), or block until a human decides
   sb approve <id> | sb deny <id>      humans only (admin token); agents cannot approve
 
 Output is human-readable; add --json to any command for JSON. Config: $SB_CONFIG or ~/.config/slicedbread/config.json.
-Exit codes: 0 ok, 1 error, 2 usage, 3 waiting for human approval.`
+Exit codes: 0 ok; 1 error (failed build, denied or obsolete approval, sb check --contains not found);
+2 usage; 3 waiting for human approval (also when sb approvals --wait times out).`
 
 type cliConfig struct {
 	API   string `json:"api"`
@@ -800,6 +801,7 @@ func runUser(args []string) error {
 
 	case "approvals":
 		waitID := fs.String("wait", "", "")
+		appFilter := fs.String("app", "", "")
 		timeout := fs.Duration("timeout", 30*time.Minute, "")
 		if _, err := parse(fs, rest); err != nil {
 			return err
@@ -828,7 +830,12 @@ func runUser(args []string) error {
 		}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 		fmt.Fprintln(tw, "ID\tSTATE\tAPP\tREQUESTED\tSUMMARY")
+		shown := 0
 		for _, a := range al.Approvals {
+			if *appFilter != "" && a.App != *appFilter {
+				continue
+			}
+			shown++
 			sum := a.Summary
 			if a.Result != "" && a.State != "pending" {
 				sum += " (" + a.Result + ")"
@@ -836,6 +843,9 @@ func runUser(args []string) error {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", a.ID, a.State, a.App, a.RequestedAt, sum)
 		}
 		tw.Flush()
+		if shown == 0 {
+			fmt.Println("(none for", *appFilter+")")
+		}
 		fmt.Println("approve at:", al.ApproveURL)
 		return nil
 
@@ -1079,14 +1089,27 @@ func (c *client) waitApproval(id string, timeout time.Duration) error {
 }
 
 func commandHelp(cmd string) string {
-	for _, line := range strings.Split(userUsage, "\n") {
-		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, "sb "+cmd+" ") || t == "sb "+cmd || strings.HasPrefix(t, "sb "+cmd+"\t") {
-			return "usage: " + t
+	lines := strings.Split(userUsage, "\n")
+	var out []string
+	for i := 0; i < len(lines); i++ {
+		t := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(t, "sb "+cmd+" ") || t == "sb "+cmd || strings.Contains(t, "| sb "+cmd+" ") {
+			out = append(out, "  "+t)
+			// continuation lines are indented deeper than command lines
+			for j := i + 1; j < len(lines) && strings.HasPrefix(lines[j], "    ") && !strings.HasPrefix(strings.TrimSpace(lines[j]), "sb "); j++ {
+				out = append(out, "    "+strings.TrimSpace(lines[j]))
+				i = j
+			}
 		}
 	}
-	return "run `sb help` for all commands"
+	if len(out) == 0 {
+		return "run `sb help` for all commands"
+	}
+	return "usage:\n" + strings.Join(out, "\n") + "\n\n" + exitCodesHelp
 }
+
+const exitCodesHelp = `exit codes: 0 ok; 1 error (including a failed build, a denied or obsolete approval, or sb check --contains not found);
+2 usage; 3 waiting for human approval (also when sb approvals --wait times out)`
 
 func handleExit(err error) int {
 	if err == nil {

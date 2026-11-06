@@ -89,5 +89,15 @@ Language: Go. Pinned versions live in `internal/config` (k3s, cert-manager, hclo
 ## Order of work
 
 1. Done: repo skeleton, Makefile, `AGENTS.md`, CI for L0.
-2. Done: provisioner (`sb dev tenant up/down/list/ssh`), reaper, L2 smoke test.
-3. Next: L1 environment (k3d, locally or on a small Hetzner box), then acceptance tests written as failing specs, then milestones M1 to M5 against them.
+2. Done: provisioner, reaper, L2 smoke test.
+3. Done: prototype platform (`make prototype-up`, `make control-push`): sb-control, login wall, approvals, builds, uploads, templates, CLI, skill file, browser login.
+4. Done: agent tests. Subagents given only `skill/SKILL.md` and the CLI deployed a Lovable export, added Umami analytics and set up Vaultwarden. Their reports drove two rounds of fixes.
+5. Next: backups and restore tests (M6), node replacement, members and GitHub login, automatic rollback, an automated template verification workflow, and turning the agent tests into a repeatable suite.
+
+## Agent tests
+
+The prototype's main QA loop is an LLM agent operating a live tenant with nothing but the skill file and the CLI:
+
+1. `make prototype-up`, then copy `bin/sb`, `skill/SKILL.md` and `.sb/runs/<id>/cli-agent.json` into an empty directory.
+2. Give a subagent a user request ("here's my Lovable export, run it, team only"), the paths, and rules: only the CLI, the skill file and the user's project; no source code, kubectl or SSH; never print secrets.
+3. Ask for a report: commands and results, final state, and every point of confusion. Fix the product, not the agent.

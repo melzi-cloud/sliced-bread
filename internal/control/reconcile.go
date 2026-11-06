@@ -130,10 +130,46 @@ func (s *Server) reconcile(ctx context.Context, a *apps.App) error {
 	if !a.Database {
 		s.kube.Delete(ctx, "postgresql.cnpg.io/v1", "Cluster", ns, "db")
 	}
+	s.syncAllowPolicies(ctx, a)
 	if a.Builds() && (a.Build == nil || a.Build.Phase == "") {
 		return s.startBuild(ctx, a)
 	}
 	return nil
+}
+
+// syncAllowPolicies keeps cross-app NetworkPolicies in step with ${apps.<x>.internal} references:
+// outbound for this app (policies in the apps it calls) and inbound (apps that call it).
+func (s *Server) syncAllowPolicies(ctx context.Context, a *apps.App) {
+	want := map[string]bool{}
+	for _, to := range apps.InternalRefs(a) {
+		want[to] = true
+		if err := s.kube.Apply(ctx, apps.AllowFromPolicy(a.Name, to)); err != nil && !kube.IsNotFound(err) {
+			s.logf("allow %s -> %s: %v (retried when %s is reconciled)", a.Name, to, err, to)
+		}
+	}
+	existing, err := s.kube.List(ctx, "networking.k8s.io/v1", "NetworkPolicy", "", apps.AllowFromLabel+"="+a.Name)
+	if err == nil {
+		for _, np := range existing {
+			ns := kube.Str(np, "metadata", "namespace")
+			to := strings.TrimPrefix(ns, "app-")
+			if !want[to] {
+				s.kube.Delete(ctx, "networking.k8s.io/v1", "NetworkPolicy", ns, kube.Str(np, "metadata", "name"))
+			}
+		}
+	}
+	list, err := s.listApps(ctx)
+	if err != nil {
+		return
+	}
+	for _, other := range list {
+		for _, to := range apps.InternalRefs(other) {
+			if to == a.Name && other.Name != a.Name {
+				if err := s.kube.Apply(ctx, apps.AllowFromPolicy(other.Name, a.Name)); err != nil {
+					s.logf("allow %s -> %s: %v", other.Name, a.Name, err)
+				}
+			}
+		}
+	}
 }
 
 // deleteApp removes an app and all its data.
@@ -142,6 +178,11 @@ func (s *Server) deleteApp(ctx context.Context, name string) error {
 		return err
 	}
 	s.obsoleteApprovals(ctx, name, "app was deleted")
+	if nps, err := s.kube.List(ctx, "networking.k8s.io/v1", "NetworkPolicy", "", apps.AllowFromLabel+"="+name); err == nil {
+		for _, np := range nps {
+			s.kube.Delete(ctx, "networking.k8s.io/v1", "NetworkPolicy", kube.Str(np, "metadata", "namespace"), kube.Str(np, "metadata", "name"))
+		}
+	}
 	return s.kube.Delete(ctx, "slicedbread.dev/v1alpha1", "App", "", name)
 }
 
@@ -387,7 +428,7 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 	case a.Template != "":
 		st.Source = "template " + a.Template
 	case a.Upload != nil:
-		st.Source = fmt.Sprintf("uploaded directory (%s, %d KB, sha256 %s)", a.Upload.ID, a.Upload.Bytes/1024, a.Upload.SHA256)
+		st.Source = fmt.Sprintf("uploaded directory (%s, %d KB, content sha256 %s)", a.Upload.ID, a.Upload.Bytes/1024, a.Upload.SHA256)
 	case a.Repo != nil:
 		st.Source = "repo " + a.Repo.URL
 		if a.Repo.Branch != "" {
@@ -436,6 +477,12 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 		kube.Num(dep, "status", "unavailableReplicas") == 0 &&
 		kube.Num(dep, "status", "replicas") == want &&
 		(a.CurrentImage() == "" || st.Serving == a.CurrentImage())
+	if settled {
+		// Pods of the previous version may still be shutting down and serving open connections.
+		if n := s.terminatingPods(ctx, ns, a.Name); n > 0 {
+			settled = false
+		}
+	}
 	ready := kube.Num(dep, "status", "readyReplicas") > 0
 	switch {
 	case a.Build != nil && a.Build.Phase == "running":
@@ -459,6 +506,21 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 		st.State = "running"
 	}
 	return st
+}
+
+// terminatingPods counts app pods that are shutting down.
+func (s *Server) terminatingPods(ctx context.Context, ns, app string) int {
+	pods, err := s.kube.List(ctx, "v1", "Pod", ns, apps.AppLabel+"="+app)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, p := range pods {
+		if kube.Str(p, "metadata", "deletionTimestamp") != "" {
+			n++
+		}
+	}
+	return n
 }
 
 func servingImage(dep kube.Obj) string {
