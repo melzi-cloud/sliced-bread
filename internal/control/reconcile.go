@@ -130,7 +130,7 @@ func (s *Server) reconcile(ctx context.Context, a *apps.App) error {
 	if !a.Database {
 		s.kube.Delete(ctx, "postgresql.cnpg.io/v1", "Cluster", ns, "db")
 	}
-	if a.Repo != nil && (a.Build == nil || a.Build.Phase == "") {
+	if a.Builds() && (a.Build == nil || a.Build.Phase == "") {
 		return s.startBuild(ctx, a)
 	}
 	return nil
@@ -155,23 +155,34 @@ func (s *Server) startBuild(ctx context.Context, a *apps.App) error {
 		lastGood = a.Build.LastGood
 	}
 	a.Build = &apps.BuildState{ID: id, Phase: "running", Image: pull, LastGood: lastGood, StartedAt: time.Now().UTC().Format(time.RFC3339)}
-	if err := s.kube.Apply(ctx, buildJob(s.cfg, a, id, push)); err != nil {
+	if err := s.kube.Apply(ctx, buildJob(s.cfg, a, id, push, s.uploadURL(a))); err != nil {
 		a.Build.Phase, a.Build.Message = "failed", "could not create build job: "+err.Error()
 	}
 	return s.saveApp(ctx, a)
 }
 
-func buildJob(cfg Config, a *apps.App, id, pushRef string) kube.Obj {
+func buildJob(cfg Config, a *apps.App, id, pushRef, uploadURL string) kube.Obj {
 	prepare := `set -eu
 apk add --no-cache git curl tar >/dev/null
-echo "cloning $SB_REPO ${SB_BRANCH:-(default branch)}"
-if [ -n "$SB_BRANCH" ]; then git clone --depth 1 --branch "$SB_BRANCH" "$SB_REPO" /work/src; else git clone --depth 1 "$SB_REPO" /work/src; fi
+mkdir -p /work/src /work/plan
+if [ -n "$SB_UPLOAD_URL" ]; then
+  echo "fetching uploaded source"
+  curl -fsSL "$SB_UPLOAD_URL" | tar xz -C /work/src
+else
+  echo "cloning $SB_REPO ${SB_BRANCH:-(default branch)}"
+  if [ -n "$SB_BRANCH" ]; then git clone --depth 1 --branch "$SB_BRANCH" "$SB_REPO" /work/src; else git clone --depth 1 "$SB_REPO" /work/src; fi
+  git -C /work/src rev-parse --short HEAD > /work/plan/commit
+fi
 cd "/work/src/$SB_PATH"
-git -C /work/src rev-parse --short HEAD > /work/plan/commit
 if [ -f Dockerfile ]; then
   echo "Dockerfile found, building it"
   echo dockerfile > /work/plan/mode
 else
+  if [ -f package-lock.json ] && { [ -f bun.lockb ] || [ -f bun.lock ]; }; then
+    echo "note: both package-lock.json and a bun lockfile found. Lovable exports often carry a stale bun.lockb,"
+    echo "      so this build uses npm with package-lock.json. Delete package-lock.json to build with bun instead."
+    rm -f bun.lockb bun.lock
+  fi
   mkdir -p /tmp/rp
   curl -fsSL "https://github.com/railwayapp/railpack/releases/download/$SB_RAILPACK/railpack-$SB_RAILPACK-x86_64-unknown-linux-musl.tar.gz" | tar xz -C /tmp/rp
   RP=$(find /tmp/rp -type f -name railpack | head -n1)
@@ -190,15 +201,16 @@ else
 fi
 echo "pushed $SB_IMAGE"
 `
-	branch, path := "", "."
-	if a.Repo.Branch != "" {
-		branch = a.Repo.Branch
-	}
-	if a.Repo.Path != "" {
-		path = strings.Trim(a.Repo.Path, "/")
+	repo, branch, path := "", "", "."
+	if a.Repo != nil {
+		repo, branch = a.Repo.URL, a.Repo.Branch
+		if a.Repo.Path != "" {
+			path = strings.Trim(a.Repo.Path, "/")
+		}
 	}
 	env := []any{
-		kube.Obj{"name": "SB_REPO", "value": a.Repo.URL},
+		kube.Obj{"name": "SB_UPLOAD_URL", "value": uploadURL},
+		kube.Obj{"name": "SB_REPO", "value": repo},
 		kube.Obj{"name": "SB_BRANCH", "value": branch},
 		kube.Obj{"name": "SB_PATH", "value": path},
 		kube.Obj{"name": "SB_RAILPACK", "value": cfg.RailpackVersion},
@@ -242,7 +254,7 @@ func (s *Server) buildJobName(a *apps.App) string { return "build-" + a.Name + "
 
 // checkBuild updates a running build. Returns true if the app changed.
 func (s *Server) checkBuild(ctx context.Context, a *apps.App) bool {
-	if a.Repo == nil || a.Build == nil || a.Build.Phase != "running" {
+	if !a.Builds() || a.Build == nil || a.Build.Phase != "running" {
 		return false
 	}
 	var job kube.Obj
@@ -356,6 +368,8 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 	switch {
 	case a.Template != "":
 		st.Source = "template " + a.Template
+	case a.Upload != nil:
+		st.Source = fmt.Sprintf("uploaded directory (%s, %d KB)", a.Upload.ID, a.Upload.Bytes/1024)
 	case a.Repo != nil:
 		st.Source = "repo " + a.Repo.URL
 		if a.Repo.Branch != "" {
@@ -379,7 +393,7 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 			st.Database = "pending"
 		}
 	}
-	if a.Repo != nil && a.Build != nil && a.Build.LastGood == "" {
+	if a.Builds() && a.Build != nil && a.Build.LastGood == "" {
 		switch a.Build.Phase {
 		case "running":
 			st.State, st.Message = "building", "first build in progress (usually 2-5 minutes); follow with: sb logs "+a.Name+" --build"

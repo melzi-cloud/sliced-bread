@@ -30,6 +30,7 @@ type Config struct {
 	RailpackVersion  string
 	InternalHostname string // Host header of in-cluster forward-auth calls
 	Listen           string
+	DataDir          string // persistent volume for uploads
 }
 
 // ConfigFromEnv reads Config.
@@ -51,6 +52,7 @@ func ConfigFromEnv() Config {
 		RailpackVersion:  get("SB_RAILPACK_VERSION", "v0.43.0"),
 		InternalHostname: get("SB_INTERNAL_HOST", "sb-control.sb-system.svc.cluster.local"),
 		Listen:           get("SB_LISTEN", ":8080"),
+		DataDir:          get("SB_DATA_DIR", "/data"),
 	}
 }
 
@@ -95,6 +97,10 @@ func (s *Server) Handler() http.Handler {
 			case "/auth/strip":
 				s.handleStrip(w, r)
 			default:
+				if strings.HasPrefix(r.URL.Path, "/internal/uploads/") {
+					s.handleInternalUpload(w, r)
+					return
+				}
 				http.NotFound(w, r)
 			}
 		case host == "api."+s.cfg.Domain:

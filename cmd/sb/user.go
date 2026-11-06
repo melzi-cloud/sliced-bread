@@ -47,7 +47,8 @@ Discover
 Deploy (exactly one source)
   sb deploy <app> --template <name> [--set key=value]...
   sb deploy <app> --image <image> [--port N]
-  sb deploy <app> --repo <https-git-url> [--branch B] [--path dir] [--port N]
+  sb deploy <app> --dir <local-path> [--port N]     (uploads source; built with Railpack or its Dockerfile)
+  sb deploy <app> --repo <https-git-url> [--branch B] [--path dir] [--port N]   (public repos)
     common flags: --env KEY=VALUE (repeatable), --secrets-stdin (KEY=VALUE lines on stdin),
                   --access wall|app-auth|public (default wall), --public-path /path (repeatable)
   sb wait <app> [--timeout 10m]       block until running (or failed)
@@ -60,7 +61,7 @@ Operate
   sb settings <app> key=value...      template settings, e.g. vaultwarden signups=true
   sb access <app> wall|app-auth|public [--public-path /path]...
   sb action <app> <action> [--input key=value]...
-  sb redeploy <app>                   rebuild from the repo, or restart
+  sb redeploy <app> [--dir <path>]    rebuild (upload new source with --dir), or restart image apps
   sb delete <app>
 
 Approvals (privileged changes requested by agents)
@@ -147,8 +148,12 @@ func (c *client) print(b []byte) {
 		os.Stdout.Write(b)
 		return
 	}
-	out, _ := json.MarshalIndent(v, "", "  ")
-	fmt.Println(string(out))
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	enc.Encode(v)
+	os.Stdout.Write(buf.Bytes())
 }
 
 // approvalExit prints a pending approval and returns exit code 3.
@@ -338,6 +343,7 @@ func runUser(args []string) error {
 		tmpl := fs.String("template", "", "")
 		image := fs.String("image", "", "")
 		repo := fs.String("repo", "", "")
+		dir := fs.String("dir", "", "")
 		branch := fs.String("branch", "", "")
 		path := fs.String("path", "", "")
 		port := fs.Int("port", 0, "")
@@ -372,6 +378,13 @@ func runUser(args []string) error {
 		}
 		if *repo != "" {
 			req["repo"] = map[string]string{"url": *repo, "branch": *branch, "path": *path}
+		}
+		if *dir != "" {
+			id, err := c.upload(*dir)
+			if err != nil {
+				return err
+			}
+			req["upload"] = id
 		}
 		if *port > 0 {
 			req["port"] = *port
@@ -563,15 +576,24 @@ func runUser(args []string) error {
 		return nil
 
 	case "redeploy":
+		dir := fs.String("dir", "", "")
 		pos, err := parse(fs, rest)
 		if err != nil {
 			return err
 		}
-		app, err := needApp(pos, "sb redeploy <app>")
+		app, err := needApp(pos, "sb redeploy <app> [--dir <path>]")
 		if err != nil {
 			return err
 		}
-		b, _, err := c.call("POST", "/v1/apps/"+url.PathEscape(app)+"/redeploy", nil)
+		var body any
+		if *dir != "" {
+			id, err := c.upload(*dir)
+			if err != nil {
+				return err
+			}
+			body = map[string]string{"upload": id}
+		}
+		b, _, err := c.call("POST", "/v1/apps/"+url.PathEscape(app)+"/redeploy", body)
 		if err != nil {
 			return err
 		}

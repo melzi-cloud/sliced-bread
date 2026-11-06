@@ -105,11 +105,6 @@ func ApplyTemplate(a *App) error {
 	if !ok {
 		return fmt.Errorf("unknown template %q (see: sb catalog)", a.Template)
 	}
-	for _, k := range t.ForbidEnv {
-		if _, set := a.Env[k]; set {
-			return fmt.Errorf("env %s cannot be set on %s apps", k, t.Name)
-		}
-	}
 	t.apply(a)
 	if a.Settings == nil {
 		a.Settings = map[string]string{}
@@ -131,6 +126,22 @@ func ApplyTemplate(a *App) error {
 	}
 	if t.Name == "vaultwarden" {
 		a.Env["SIGNUPS_ALLOWED"] = a.Settings["signups"]
+	}
+	return nil
+}
+
+// CheckUserEnv refuses env keys a template controls itself.
+func CheckUserEnv(template string, keys ...string) error {
+	t, ok := Catalog[template]
+	if !ok {
+		return nil
+	}
+	for _, f := range t.ForbidEnv {
+		for _, k := range keys {
+			if k == f {
+				return fmt.Errorf("env %s cannot be set on %s apps (it is managed by the template; see: sb catalog)", k, t.Name)
+			}
+		}
 	}
 	return nil
 }

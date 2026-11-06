@@ -20,8 +20,9 @@ const (
 type App struct {
 	Name        string            `json:"name"`
 	Template    string            `json:"template,omitempty"`
-	Image       string            `json:"image,omitempty"` // for image deploys and templates
-	Repo        *Repo             `json:"repo,omitempty"`  // for git deploys
+	Image       string            `json:"image,omitempty"`  // for image deploys and templates
+	Repo        *Repo             `json:"repo,omitempty"`   // for git deploys
+	Upload      *Upload           `json:"upload,omitempty"` // for source uploaded from a local directory
 	Port        int               `json:"port,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`        // values may reference ${...}
 	SecretKeys  []string          `json:"secretKeys,omitempty"` // env keys whose values live in the app secret
@@ -44,6 +45,15 @@ type Repo struct {
 	Branch string `json:"branch,omitempty"`
 	Path   string `json:"path,omitempty"`
 }
+
+// Upload is source code uploaded by the CLI and stored by the control plane.
+type Upload struct {
+	ID    string `json:"id"`
+	Bytes int64  `json:"bytes,omitempty"`
+}
+
+// Builds reports whether the app is built from source (repo or upload).
+func (a *App) Builds() bool { return a.Repo != nil || a.Upload != nil }
 
 // BuildState tracks the latest build of a repo app.
 type BuildState struct {
@@ -68,6 +78,8 @@ var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,28}[a-z0-9]$`)
 // Reserved names cannot be used for apps because they are platform hostnames.
 var Reserved = map[string]bool{"api": true, "auth": true, "www": true, "registry": true, "sb": true}
 
+var uploadIDRE = regexp.MustCompile(`^u[a-z0-9]{10}$`)
+
 var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Validate checks an app spec.
@@ -82,6 +94,12 @@ func (a *App) Validate() error {
 	if a.Image != "" {
 		sources++
 	}
+	if a.Upload != nil {
+		sources++
+		if !uploadIDRE.MatchString(a.Upload.ID) {
+			return fmt.Errorf("invalid upload id")
+		}
+	}
 	if a.Repo != nil {
 		sources++
 		if !strings.HasPrefix(a.Repo.URL, "https://") {
@@ -92,7 +110,7 @@ func (a *App) Validate() error {
 		}
 	}
 	if sources != 1 {
-		return fmt.Errorf("an app needs exactly one source: an image, a repo, or a template")
+		return fmt.Errorf("an app needs exactly one source: a template, an image, a repo, or a directory")
 	}
 	switch a.Access {
 	case AccessWall, AccessAppAuth, AccessPublic:
@@ -169,7 +187,7 @@ func (a *App) RemoveSecretKey(key string) {
 
 // CurrentImage is the image the deployment should run, or "" if a repo app has no successful build yet.
 func (a *App) CurrentImage() string {
-	if a.Repo != nil {
+	if a.Builds() {
 		if a.Build != nil {
 			return a.Build.LastGood
 		}

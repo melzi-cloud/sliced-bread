@@ -53,7 +53,7 @@ func resolveEnv(a *App, p Params) ([]any, error) {
 	}
 	sort.Strings(keys)
 	var out []any
-	if a.Repo != nil {
+	if a.Builds() {
 		if _, ok := a.Env["PORT"]; !ok {
 			out = append(out, Obj{"name": "PORT", "value": fmt.Sprint(a.ContainerPort())})
 		}

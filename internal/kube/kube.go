@@ -72,6 +72,24 @@ func IsConflict(err error) bool {
 }
 
 func (c *Client) do(ctx context.Context, method, path, contentType string, body []byte) ([]byte, error) {
+	var b []byte
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		b, err = c.once(ctx, method, path, contentType, body)
+		var se *StatusError
+		if err == nil || !(errors.As(err, &se) && (se.Code == http.StatusTooManyRequests || se.Code >= 500)) {
+			return b, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(time.Duration(attempt+1) * time.Second):
+		}
+	}
+	return b, err
+}
+
+func (c *Client) once(ctx context.Context, method, path, contentType string, body []byte) ([]byte, error) {
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)

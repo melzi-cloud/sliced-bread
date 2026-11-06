@@ -118,10 +118,18 @@ func TestRenderTemplates(t *testing.T) {
 	if !strings.Contains(js(find(objs, "Deployment", "web")), `"type":"Recreate"`) {
 		t.Fatal("apps with volumes must use Recreate")
 	}
-	bad := &App{Name: "vault", Template: "vaultwarden", Env: map[string]string{"ADMIN_TOKEN": "x"}}
-	if err := ApplyTemplate(bad); err == nil {
+	if err := CheckUserEnv("vaultwarden", "ADMIN_TOKEN"); err == nil {
 		t.Fatal("ADMIN_TOKEN must be refused")
 	}
+	if err := CheckUserEnv("vaultwarden", "FOO"); err != nil {
+		t.Fatal(err)
+	}
+	again := cloneForTest(v)
+	again.Settings["signups"] = "true"
+	if err := ApplyTemplate(again); err != nil || again.Env["SIGNUPS_ALLOWED"] != "true" {
+		t.Fatalf("re-applying a template with new settings must work: %v %v", err, again.Env)
+	}
+	var bad *App
 	bad = &App{Name: "vault", Template: "vaultwarden", Settings: map[string]string{"signups": "maybe"}}
 	if err := ApplyTemplate(bad); err == nil {
 		t.Fatal("invalid setting value must be refused")
@@ -154,4 +162,11 @@ func TestEnvRefErrors(t *testing.T) {
 	if _, err := Render(a, testParams); err == nil {
 		t.Fatal("partial secret ref must fail")
 	}
+}
+
+func cloneForTest(a *App) *App {
+	b, _ := json.Marshal(a)
+	var c App
+	json.Unmarshal(b, &c)
+	return &c
 }

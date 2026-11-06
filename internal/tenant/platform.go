@@ -117,7 +117,11 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
+        fsGroup: 65532
         seccompProfile: {type: RuntimeDefault}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: sb-control-data}
       containers:
         - name: sb-control
           image: {{.ControlImage}}
@@ -128,6 +132,7 @@ spec:
             - {name: SB_ADMIN_EMAIL, value: "{{.AdminEmail}}"}
             - {name: SB_RAILPACK_VERSION, value: "` + RailpackVersion + `"}
             - {name: SB_REGISTRY_PULL, value: "` + RegistryPullHost + `"}
+          volumeMounts: [{name: data, mountPath: /data}]
           readinessProbe:
             httpGet: {path: /healthz, port: 8080}
           securityContext:
@@ -137,6 +142,17 @@ spec:
           resources:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sb-control-data
+  namespace: sb-system
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: hcloud-volumes
+  resources:
+    requests: {storage: 10Gi}
 ---
 apiVersion: v1
 kind: Service

@@ -25,6 +25,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	enc.Encode(v)
 }
@@ -59,6 +60,7 @@ func (s *Server) apiMux() http.Handler {
 	m.HandleFunc("POST /v1/apps/{name}/redeploy", s.apiRedeploy)
 	m.HandleFunc("GET /v1/apps/{name}/logs", s.apiLogs)
 	m.HandleFunc("POST /v1/apps/{name}/actions/{action}", s.apiAction)
+	m.HandleFunc("POST /v1/uploads", s.apiUpload)
 	m.HandleFunc("GET /v1/approvals", s.apiListApprovals)
 	m.HandleFunc("POST /v1/approvals/{id}/{decision}", s.apiDecide)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +127,7 @@ type DeployRequest struct {
 	Template    string            `json:"template,omitempty"`
 	Image       string            `json:"image,omitempty"`
 	Repo        *apps.Repo        `json:"repo,omitempty"`
+	Upload      string            `json:"upload,omitempty"` // id returned by POST /v1/uploads
 	Port        int               `json:"port,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
 	Secrets     map[string]string `json:"secrets,omitempty"`
@@ -197,9 +200,28 @@ func (s *Server) apiCreateApp(w http.ResponseWriter, r *http.Request) {
 		Name: req.Name, Template: req.Template, Image: req.Image, Repo: req.Repo, Port: req.Port,
 		Env: req.Env, Settings: req.Settings, PublicPaths: req.PublicPaths, Access: apps.AccessWall,
 	}
+	if req.Upload != "" {
+		size, ok := s.uploadSize(req.Upload)
+		if !ok {
+			fail(w, 400, "unknown upload "+req.Upload, "upload the directory again with: sb deploy --dir")
+			return
+		}
+		a.Upload = &apps.Upload{ID: req.Upload, Bytes: size}
+	}
+	envKeys := []string{}
+	for k := range req.Env {
+		envKeys = append(envKeys, k)
+	}
+	for k := range req.Secrets {
+		envKeys = append(envKeys, k)
+	}
+	if err := apps.CheckUserEnv(a.Template, envKeys...); err != nil {
+		fail(w, 400, err.Error(), "")
+		return
+	}
 	if a.Template != "" {
-		if a.Image != "" || a.Repo != nil {
-			fail(w, 400, "use either a template, an image or a repo, not several", "")
+		if a.Image != "" || a.Repo != nil || a.Upload != nil {
+			fail(w, 400, "use exactly one of: template, image, repo, directory", "")
 			return
 		}
 		if err := apps.ApplyTemplate(a); err != nil {
@@ -225,7 +247,7 @@ func (s *Server) apiCreateApp(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	ctx := r.Context()
 	if _, err := s.getApp(ctx, a.Name); err == nil {
-		fail(w, 409, "app "+a.Name+" already exists", "change it with sb env / sb settings / sb redeploy, or pick another name")
+		fail(w, 409, "app "+a.Name+" already exists", "to ship new code run: sb redeploy "+a.Name+" [--dir <path>]; change config with sb env / sb settings; or pick another name")
 		return
 	}
 	if why := needsApproval(scopeOf(r), nil, a); why != "" {
@@ -305,15 +327,17 @@ func (s *Server) apiEnv(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
-	if t := apps.Catalog[a.Template]; t != nil {
-		for _, k := range t.ForbidEnv {
-			_, inSet := req.Set[k]
-			_, inSec := req.Secrets[k]
-			if inSet || inSec {
-				fail(w, 400, "env "+k+" cannot be changed on "+t.Name+" apps", "use: sb settings")
-				return
-			}
-		}
+	var keys []string
+	for k := range req.Set {
+		keys = append(keys, k)
+	}
+	for k := range req.Secrets {
+		keys = append(keys, k)
+	}
+	keys = append(keys, req.Unset...)
+	if err := apps.CheckUserEnv(a.Template, keys...); err != nil {
+		fail(w, 400, err.Error(), "use: sb settings")
+		return
 	}
 	if a.Env == nil {
 		a.Env = map[string]string{}
@@ -442,6 +466,15 @@ func (s *Server) apiAccess(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiRedeploy(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Upload string `json:"upload"`
+	}
+	if r.ContentLength != 0 {
+		if err := decode(r, &req); err != nil {
+			fail(w, 400, "invalid request: "+err.Error(), "")
+			return
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a := s.loadApp(w, r)
@@ -449,7 +482,19 @@ func (s *Server) apiRedeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	if a.Repo != nil {
+	if req.Upload != "" {
+		if a.Upload == nil {
+			fail(w, 400, a.Name+" was not deployed from a directory", "")
+			return
+		}
+		size, ok := s.uploadSize(req.Upload)
+		if !ok {
+			fail(w, 400, "unknown upload "+req.Upload, "")
+			return
+		}
+		a.Upload = &apps.Upload{ID: req.Upload, Bytes: size}
+	}
+	if a.Builds() {
 		if a.Build != nil && a.Build.Phase == "running" {
 			fail(w, 409, "a build is already running", "follow it with: sb logs "+a.Name+" --build")
 			return
@@ -458,7 +503,7 @@ func (s *Server) apiRedeploy(w http.ResponseWriter, r *http.Request) {
 			fail(w, 500, err.Error(), "")
 			return
 		}
-		writeJSON(w, 202, map[string]any{"build": a.Build, "hint": "Rebuilding from the latest commit. Follow with: sb logs " + a.Name + " --build, then: sb wait " + a.Name})
+		writeJSON(w, 202, map[string]any{"app": s.status(ctx, a), "hint": "Rebuilding. Follow with: sb logs " + a.Name + " --build, then: sb wait " + a.Name})
 		return
 	}
 	if a.Env == nil {
@@ -547,7 +592,13 @@ func (s *Server) apiListApprovals(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.SliceStable(list, func(i, j int) bool { return list[i].State == "pending" && list[j].State != "pending" })
 	type view struct {
-		ID, App, Kind, Summary, RequestedAt, State, Result string
+		ID          string `json:"id"`
+		App         string `json:"app"`
+		Kind        string `json:"kind"`
+		Summary     string `json:"summary"`
+		RequestedAt string `json:"requestedAt"`
+		State       string `json:"state"`
+		Result      string `json:"result,omitempty"`
 	}
 	out := []view{}
 	for _, ap := range list {
