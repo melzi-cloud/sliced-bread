@@ -64,3 +64,10 @@ Repos and uploaded directories are built by a Job (clone or fetch, `railpack pre
 
 ## D-020 sb-control image is built locally and imported over SSH (2026-11-06)
 go-containerregistry packs the static binary onto a distroless base, and the tarball is imported into containerd on each node. No external registry or extra credentials. `sb dev control push <run-id>` rolls out a new build in about a minute.
+
+## D-021 Self-hosted mode is the first release (2026-11-06)
+Users run `sb init` from their laptop with their own Hetzner and Cloudflare tokens and their own domain, choosing 1 node (cheap, no HA) or 3 nodes (HA). The control plane runs inside their cluster. Hosted-by-us starts as a waitlist; bring-your-own-servers comes later. Details in [hosting-modes.md](hosting-modes.md).
+Why: it is what exists, it needs no billing or abuse handling, and it fits the open-source, no-lock-in positioning.
+
+## D-022 TLS termination depends on the mode (2026-11-06)
+Self-hosted: TLS ends inside the user's cluster, one wildcard per tenant via DNS-01, keys never leave it; add ZeroSSL or Google Trust Services as a fallback issuer. Hosted by us: we terminate TLS at a shared edge with flat hostnames (`<app>-<tenant>.slicedbread.cloud`) covered by one wildcard. The MVP keeps hosted mode possible: hostnames from one function, host-only cookies with a per-host session exchange, forwarding headers trusted only from the edge, uploads not capped at 100 MB.

@@ -1,6 +1,6 @@
 # SlicedBread TODO
 
-Status (2026-11-06, implementation thread): items 1 (placement group), 2 (metadata block, CSI hostNetwork, token rotation) and 3 (cross-app internal URLs) are implemented; 1 and 2 are verified by the smoke test. Item 4 (components and replicas) is open and needs a design decision.
+Status (2026-11-06, implementation thread): items 1 (placement group), 2 (metadata block, CSI hostNetwork, token rotation) and 3 (cross-app internal URLs) are implemented; 1 and 2 are verified by the smoke test. Item 4 (components and replicas) is open and needs a design decision. Item 5 (cookie hardening) is open. See also [hosting-modes.md](hosting-modes.md).
 
 Written 2026-11-06 against `main` at `3a1af24`, from the user stories review (`/tmp/slicedbread-user-stories/index.html`).
 This file lives in `/tmp` and macOS clears `/tmp` on reboot. The implementation thread should copy it into the repo (for example `docs/todo.md`) and keep it there.
@@ -58,6 +58,19 @@ Add both checks to the smoke test so this cannot regress.
 The Coolify and Dokploy templates we planned to adapt are multi-service compose files, so the same model change is needed for the catalog.
 
 **What:** a design decision first. The proposed `slicedbread.yaml` in story 6 is a starting point. For replicas > 1, also add topology spread across nodes and a PodDisruptionBudget. Refuse replicas > 1 on a component with a single-attach volume.
+
+### 5. Harden login wall cookies
+
+**Why:** until `slicedbread.cloud` is on the Public Suffix List (months away, and only likely once there are thousands of users), any tenant subdomain can set cookies for the whole `slicedbread.cloud` domain. The signed session cannot be forged, but another tenant can shadow it (log users out) or break CSRF protection that relies on a double-submit cookie. Hosted mode needs host-only cookies anyway (see [hosting-modes.md](hosting-modes.md)).
+
+**What:**
+- `__Host-` prefix on cookies set by `auth.<tenant>` (host-only, cannot be set from another subdomain).
+- Per-tenant cookie names (for example `sb_s_<tenant-id>`) so they cannot be shadowed by name.
+- CSRF tokens tied to the session, not a separate cookie.
+- Session signature covers the tenant id.
+- Move toward the per-host session exchange described in [hosting-modes.md](hosting-modes.md).
+
+**Done when:** a test sets a conflicting `sb_session` / `sb_csrf` cookie for the parent domain and the wall and approvals still work correctly.
 
 ## Future work
 
