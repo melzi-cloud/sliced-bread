@@ -184,8 +184,21 @@ func (s *Server) listApps(ctx context.Context) ([]*apps.App, error) {
 	return out, nil
 }
 
+// saveApp records a change a person or agent asked for. It bumps the generation,
+// which makes pending approvals for the app obsolete.
 func (s *Server) saveApp(ctx context.Context, a *apps.App) error {
 	a.Generation++
+	if err := s.putApp(ctx, a); err != nil {
+		return err
+	}
+	s.obsoleteApprovals(ctx, a.Name, "the app changed after this was requested; ask again")
+	return nil
+}
+
+// saveInternal records control-plane bookkeeping (build progress, hook state) without bumping the generation.
+func (s *Server) saveInternal(ctx context.Context, a *apps.App) error { return s.putApp(ctx, a) }
+
+func (s *Server) putApp(ctx context.Context, a *apps.App) error {
 	b, _ := json.Marshal(a)
 	var spec map[string]any
 	json.Unmarshal(b, &spec)
@@ -317,7 +330,12 @@ func (s *Server) executeApproval(ctx context.Context, ap *Approval) error {
 			return fmt.Errorf("approval has no desired state")
 		}
 		if gerr == nil {
+			// Approvals change access or settings, never the source: keep whatever is deployed now.
 			ap.Desired.Build, ap.Desired.Hooks, ap.Desired.Generation = cur.Build, cur.Hooks, cur.Generation
+			ap.Desired.Upload, ap.Desired.Repo = cur.Upload, cur.Repo
+			if cur.Template == "" {
+				ap.Desired.Image = cur.Image
+			}
 		}
 		if err = s.saveApp(ctx, ap.Desired); err == nil {
 			err = s.reconcile(ctx, ap.Desired)

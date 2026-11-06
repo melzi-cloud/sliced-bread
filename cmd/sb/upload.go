@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -153,7 +155,13 @@ func listUpload(root string) error {
 	for _, f := range files {
 		fmt.Println(f)
 	}
-	fmt.Fprintf(os.Stderr, "%d files would be uploaded (skipped: %s)\n", len(files), skipList())
+	data, _, err := tarDir(root)
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(data)
+	fmt.Printf("%d files, %d KB compressed, sha256 %s (skipped: %s)\n", len(files), len(data)/1024, hex.EncodeToString(sum[:])[:12], skipList())
+	fmt.Println("note: the sha256 matches the deployed source only if no file changed; timestamps are included.")
 	return nil
 }
 

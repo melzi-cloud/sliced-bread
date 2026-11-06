@@ -32,7 +32,7 @@ If `sb whoami` fails with "not logged in", ask the user for the API URL (`https:
 | A public git repo | `sb deploy <app> --repo https://github.com/org/repo` |
 | A prebuilt container image | `sb deploy <app> --image <image> --port <port>` |
 
-After every deploy, run `sb wait <app>`. It prints progress and ends with `ready: <url>` or an error with a hint. Source builds take up to 5 minutes (seconds when nothing changed). Databases take 1 to 2 minutes to come up.
+After every deploy or redeploy, run `sb wait <app>`. It returns only when the **latest** version is built, rolled out and ready (states it passes through: `building`, `starting`, `updating`, `configuring`), and ends with `ready: <url>` (plus the build id now serving, for source apps). If the new build fails it exits 1, even though the previous version keeps serving (`update-failed`). Source builds take up to 5 minutes (seconds when nothing changed). Databases take 1 to 2 minutes to come up.
 
 Then verify the app really serves what you expect with `sb check <app> [/path] [--contains text]`. It fetches the page from inside the cluster, past the login wall, so it works for private apps. Use it to confirm a page renders, that client-side routes fall back to `index.html` (`sb check myapp /some/route`), and that an edit made it into the deployed version (`--contains`).
 
@@ -45,7 +45,7 @@ App names: 2 to 30 lowercase letters, digits or dashes, starting with a letter. 
 - Needs Postgres? Add `--database`: a Postgres database is created next to the app and `DATABASE_URL` is set (a `postgresql://` URL).
 - Has a health endpoint? Add `--health-path /healthz` so a new version only takes traffic once it answers there (default: the port accepts connections).
 - `--dir` skips `node_modules`, `.git`, `dist`, `build`, `.next`, `.venv`, `target` and similar folders. Everything else is uploaded, including `.env` files, because Vite and similar tools read them at build time. Do not keep server-side secrets in uploaded files; use `sb env set --secrets-stdin`. Preview the file list with `--dry-run`. A `.dockerignore` in the project is respected by the build. You do not need to build locally.
-- `sb status <app>` shows the sha256 of the uploaded source, so you can confirm which upload is deployed.
+- `sb status <app>` shows the sha256 of the uploaded source and the build id serving. `sb deploy <app> --dir <path> --dry-run` prints the sha256 of the folder as it is now, so you can tell whether a local folder matches what is deployed. The app name can differ from the folder name.
 - To ship code changes: `sb redeploy <app> --dir <path>` (or `sb redeploy <app>` for a repo, which pulls the latest commit). The previous version keeps serving until the new build is ready.
 - If a build fails: `sb logs <app> --build` shows the clone, plan and build output.
 
@@ -117,12 +117,16 @@ Actions marked `adminOnly` are for the human; if you get "admin token only", tel
 
 ```sh
 sb deploy analytics --template umami
-sb wait analytics
+sb wait analytics          # includes template setup; actions work once this returns
 sb action analytics create_website --input name="My App" --input domain=myapp.<tenant-domain>
 # output includes "snippet": a <script> tag
 ```
 
-Then add the snippet inside `<head>` of the app's HTML (for Vite/React/Lovable projects: `index.html` at the project root), ship it with `sb redeploy myapp --dir <path>`, run `sb wait myapp`, and verify with `sb check myapp --contains data-website-id`.
+Then add the snippet inside `<head>` of the app's HTML (for Vite/React/Lovable projects: `index.html` at the project root), ship it with `sb redeploy myapp --dir <path>`, run `sb wait myapp`, and verify with `sb check myapp --contains data-website-id`. `sb action analytics stats` shows page views per website for the last 24 hours.
+
+Tell the user two things:
+- If the tracked app is behind the wall, only signed-in team members' visits are counted. Real visitor numbers need the app to be `public` (`sb access myapp public`, needs approval). Do not request that unless the user wants it.
+- The Umami dashboard has its own login, available to the human with `sb action analytics dashboard_login` (admin token).
 
 ### Example: password manager
 

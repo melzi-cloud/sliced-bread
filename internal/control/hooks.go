@@ -102,7 +102,7 @@ func (s *Server) runHooks(ctx context.Context, a *apps.App) bool {
 	if a.Template != "umami" || (a.Hooks != nil && a.Hooks["admin-password"] == "set") {
 		return false
 	}
-	if st := s.status(ctx, a); st.State != "running" {
+	if st := s.status(ctx, a); st.State != "running" && st.State != "configuring" {
 		return false
 	}
 	vals, err := s.appSecret(ctx, a)
@@ -172,6 +172,45 @@ func (s *Server) runAction(ctx context.Context, a *apps.App, action string, inpu
 			"snippet":    fmt.Sprintf(`<script defer src="%s" data-website-id="%s"></script>`, script, site.ID),
 			"next":       "Add the snippet inside <head> of the site (for a Vite/React app: index.html), then redeploy that app.",
 		}, nil
+	case "umami/stats":
+		if a.Hooks["admin-password"] != "set" {
+			return nil, fmt.Errorf("umami is still starting; run `sb wait %s` and retry", a.Name)
+		}
+		hours := 24
+		if h := input["hours"]; h != "" {
+			fmt.Sscanf(h, "%d", &hours)
+			if hours <= 0 || hours > 24*90 {
+				hours = 24
+			}
+		}
+		vals, err := s.appSecret(ctx, a)
+		if err != nil {
+			return nil, err
+		}
+		login, err := umamiLoginAs(ctx, a, vals["UMAMI_ADMIN_PASSWORD"])
+		if err != nil {
+			return nil, fmt.Errorf("umami login: %w", err)
+		}
+		var sites struct {
+			Data []struct{ ID, Name, Domain string } `json:"data"`
+		}
+		if err := getJSON(ctx, internalURL(a)+"/api/websites", login.Token, &sites); err != nil {
+			return nil, err
+		}
+		end := time.Now()
+		start := end.Add(-time.Duration(hours) * time.Hour)
+		var out []map[string]any
+		for _, w := range sites.Data {
+			var st map[string]any
+			url := fmt.Sprintf("%s/api/websites/%s/stats?startAt=%d&endAt=%d", internalURL(a), w.ID, start.UnixMilli(), end.UnixMilli())
+			if err := getJSON(ctx, url, login.Token, &st); err != nil {
+				out = append(out, map[string]any{"name": w.Name, "domain": w.Domain, "website_id": w.ID, "error": err.Error()})
+				continue
+			}
+			out = append(out, map[string]any{"name": w.Name, "domain": w.Domain, "website_id": w.ID,
+				"pageviews": statNum(st["pageviews"]), "visitors": statNum(st["visitors"]), "visits": statNum(st["visits"])})
+		}
+		return map[string]any{"hours": hours, "websites": out}, nil
 	case "umami/dashboard_login":
 		vals, err := s.appSecret(ctx, a)
 		if err != nil {
@@ -184,4 +223,30 @@ func (s *Server) runAction(ctx context.Context, a *apps.App, action string, inpu
 		return map[string]any{"url": "https://" + apps.Host(a.Name, s.cfg.Domain), "username": "admin", "password": pw}, nil
 	}
 	return nil, fmt.Errorf("app %s (template %q) has no action %q", a.Name, a.Template, action)
+}
+
+func getJSON(ctx context.Context, url, bearer string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	resp, err := hookHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return json.Unmarshal(body, out)
+}
+
+// statNum accepts Umami's stat values, which are numbers or {"value": n} depending on version.
+func statNum(v any) any {
+	if m, ok := v.(map[string]any); ok {
+		return m["value"]
+	}
+	return v
 }

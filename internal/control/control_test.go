@@ -1,6 +1,8 @@
 package control
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -161,5 +163,56 @@ func TestNeedsApproval(t *testing.T) {
 	withPaths := &apps.App{Name: "crm", Image: "x", Access: apps.AccessWall, PublicPaths: []string{"/hook"}}
 	if needsApproval(ScopeAgent, wall, withPaths) == "" {
 		t.Fatal("adding public paths needs approval")
+	}
+}
+
+func TestDeviceFlow(t *testing.T) {
+	s := testServer()
+	s.devices = deviceStore{grants: map[string]*deviceGrant{}}
+	api := s.apiMux()
+	call := func(method, path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, nil)
+		w := httptest.NewRecorder()
+		api.ServeHTTP(w, r)
+		return w
+	}
+	w := call("POST", "/v1/device?label=laptop")
+	if w.Code != 201 {
+		t.Fatalf("start: %d %s", w.Code, w.Body)
+	}
+	var start struct{ Code, Poll, VerifyURL string }
+	json.Unmarshal(w.Body.Bytes(), &start)
+	if !strings.Contains(start.VerifyURL, "https://auth.r1.test.slicedbread.dev/device?code="+start.Code) || len(start.Code) != 9 {
+		t.Fatalf("bad start response %+v", start)
+	}
+	if w := call("GET", "/v1/device/"+start.Poll); w.Code != 202 {
+		t.Fatalf("pending poll: %d", w.Code)
+	}
+	if w := call("GET", "/v1/device/wrong"); w.Code != 404 {
+		t.Fatalf("unknown poll: %d", w.Code)
+	}
+	if err := s.approveDevice(context.Background(), "NOPE-NOPE", "me", true); err == nil {
+		t.Fatal("unknown code must fail")
+	}
+	if err := s.approveDevice(context.Background(), start.Code, "me", true); err != nil {
+		t.Fatal(err)
+	}
+	w = call("GET", "/v1/device/"+start.Poll)
+	var got struct{ Token, Scope string }
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if w.Code != 200 || !strings.HasPrefix(got.Token, "sbt_") || got.Scope != ScopeAgent {
+		t.Fatalf("approved poll: %d %s", w.Code, w.Body)
+	}
+	r := httptest.NewRequest("GET", "/v1/whoami", nil)
+	r.Header.Set("Authorization", "Bearer "+got.Token)
+	if s.auth.TokenScope(r) != ScopeAgent {
+		t.Fatal("minted token must work with agent scope")
+	}
+	if w := call("GET", "/v1/device/"+start.Poll); w.Code != 404 {
+		t.Fatal("token must be handed out only once")
+	}
+	// Device endpoints are the only unauthenticated API paths.
+	if w := call("GET", "/v1/apps"); w.Code != 401 {
+		t.Fatalf("apps without token: %d", w.Code)
 	}
 }

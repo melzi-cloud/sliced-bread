@@ -44,7 +44,8 @@ Discover
   sb catalog                          templates, their settings and actions
   sb apps                             all apps with state and URL
   sb status <app>                     details, env keys, actions, notes
-  sb check <app> [/path] [--contains text]   fetch a page as a signed-in user would see it (works behind the wall)
+  sb check <app> [/path] [--contains text]   fetch a page as a signed-in user would see it (works behind the wall);
+                                             exits 1 if --contains is not found
 
 Deploy (exactly one source)
   sb deploy <app> --template <name> [--set key=value]...
@@ -55,7 +56,7 @@ Deploy (exactly one source)
     common flags: --env KEY=VALUE (repeatable), --secrets-stdin (KEY=VALUE lines on stdin),
                   --database (Postgres; sets DATABASE_URL), --health-path /healthz,
                   --access wall|app-auth|public (default wall), --public-path /path (repeatable)
-  sb wait <app> [--timeout 10m]       block until running (or failed)
+  sb wait <app> [--timeout 10m]       block until the latest version is serving and ready (exit 1 if its build failed)
 
 Operate
   sb logs <app> [--build] [--tail N]
@@ -743,7 +744,11 @@ func runUser(args []string) error {
 		if err != nil {
 			return err
 		}
-		c.print(b)
+		if jsonMode {
+			c.print(b)
+			return nil
+		}
+		printKV(b)
 		return nil
 
 	case "redeploy":
@@ -852,6 +857,41 @@ func runUser(args []string) error {
 	return &exitErr{exitUsage, "unknown command " + cmd + "\n\n" + userUsage}
 }
 
+// printKV prints a JSON object as "key: value" lines; nested values are printed as compact JSON.
+func printKV(b []byte) {
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		os.Stdout.Write(b)
+		return
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		switch v := m[k].(type) {
+		case string:
+			fmt.Printf("%s: %s\n", k, v)
+		case []any:
+			fmt.Printf("%s:\n", k)
+			for _, it := range v {
+				var buf bytes.Buffer
+				enc := json.NewEncoder(&buf)
+				enc.SetEscapeHTML(false)
+				enc.Encode(it)
+				fmt.Printf("  - %s", buf.String())
+			}
+		default:
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(false)
+			enc.Encode(v)
+			fmt.Printf("%s: %s", k, buf.String())
+		}
+	}
+}
+
 // printAppResult prints an app status response in a compact form.
 func (c *client) printAppResult(b []byte) error {
 	if c.json || jsonMode {
@@ -874,7 +914,7 @@ func (c *client) printAppResult(b []byte) error {
 }
 
 func printStatus(st map[string]any) {
-	for _, k := range []string{"name", "url", "state", "message", "access", "source", "database"} {
+	for _, k := range []string{"name", "url", "state", "message", "access", "source", "servingBuild", "database"} {
 		if v, ok := st[k]; ok && v != "" && v != nil {
 			fmt.Printf("%s: %v\n", k, v)
 		}
@@ -934,7 +974,7 @@ func printStatus(st map[string]any) {
 	}
 }
 
-// wait polls an app until it is running, failed, or the timeout passes.
+// wait polls an app until its latest version is serving, a build fails, or the timeout passes.
 func (c *client) wait(app string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	last := ""
@@ -944,7 +984,7 @@ func (c *client) wait(app string, timeout time.Duration) error {
 			return err
 		}
 		var st struct {
-			State, Message, URL string
+			State, Message, URL, ServingBuild string
 		}
 		json.Unmarshal(b, &st)
 		line := st.State
@@ -957,9 +997,13 @@ func (c *client) wait(app string, timeout time.Duration) error {
 		}
 		switch st.State {
 		case "running":
-			fmt.Println("ready:", st.URL)
+			if st.ServingBuild != "" {
+				fmt.Printf("ready: %s (serving build %s)\n", st.URL, st.ServingBuild)
+			} else {
+				fmt.Println("ready:", st.URL)
+			}
 			return nil
-		case "build-failed":
+		case "build-failed", "update-failed":
 			return &exitErr{exitError, "build failed; read the logs with: sb logs " + app + " --build"}
 		}
 		if time.Now().After(deadline) {

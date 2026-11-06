@@ -170,3 +170,25 @@ func cloneForTest(a *App) *App {
 	json.Unmarshal(b, &c)
 	return &c
 }
+
+func TestVaultwardenSignupDomain(t *testing.T) {
+	v := &App{Name: "vault", Template: "vaultwarden", Settings: map[string]string{"signups": "true", "signup_domain": "acme.com"}}
+	if err := ApplyTemplate(v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Env["SIGNUPS_DOMAINS_WHITELIST"] != "acme.com" || v.Env["SIGNUPS_ALLOWED"] != "true" {
+		t.Fatalf("env: %v", v.Env)
+	}
+	v.Settings["signup_domain"] = ""
+	ApplyTemplate(v)
+	if _, ok := v.Env["SIGNUPS_DOMAINS_WHITELIST"]; ok {
+		t.Fatal("clearing the domain must remove the restriction")
+	}
+	bad := &App{Name: "vault", Template: "vaultwarden", Settings: map[string]string{"signup_domain": "not a domain"}}
+	if err := ApplyTemplate(bad); err == nil {
+		t.Fatal("invalid domain accepted")
+	}
+	if err := CheckUserEnv("vaultwarden", "SIGNUPS_DOMAINS_WHITELIST"); err == nil {
+		t.Fatal("template-managed env must be refused")
+	}
+}

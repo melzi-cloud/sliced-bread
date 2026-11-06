@@ -78,11 +78,15 @@ var Catalog = map[string]*Template{
 				Description: "Register a website and return the tracking snippet to add to its HTML <head>.",
 				Input:       map[string]string{"name": "display name", "domain": "site domain without scheme, e.g. shop.example.com"},
 			},
+			{Name: "stats", Description: "Page views and visitors per website over the last 24 hours. Use it to verify tracking works.",
+				Input: map[string]string{"hours": "optional, look-back window in hours (default 24)"}},
 			{Name: "dashboard_login", Description: "Return the Umami dashboard username and password (human use).", AdminOnly: true},
 		},
 		Notes: "The dashboard sits behind the SlicedBread login wall and also has its own Umami login (see dashboard_login). " +
 			"The tracker script (/script.js) and event endpoint (/api/send) are public so websites can report visits. " +
-			"Use the create_website action to get a snippet; do not create sites through the UI.",
+			"Use the create_website action to get a snippet; do not create sites through the UI. " +
+			"If the tracked app is behind the wall, only signed-in team members' visits are counted. " +
+			"Umami ignores requests with bot user agents, so test events need a browser user agent. Check counts with the stats action.",
 		apply: func(a *App) {
 			a.Image = "ghcr.io/umami-software/umami:3.4.1"
 			a.Port = 3000

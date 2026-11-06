@@ -11,11 +11,11 @@ The first goal is a working demo of three flows:
 | | Milestone | Done when |
 |---|---|---|
 | M0 | One tenant created by a script | 3 Debian VMs, k3s HA, Hetzner CSI, Traefik, cert-manager with a wildcard cert, Hetzner LB, firewall allowing only 80/443. **Done 2026-11-06** (`make e2e-hetzner`) |
-| M1 | Minimal control plane | GitHub login, org = tenant, API, desired state, tenant agent pulling and applying |
-| M2 | Deploys | Container image and GitHub repo (Railpack) deploy to `<app>.<tenant>.slicedbread.cloud` with TLS |
-| M3 | Login wall | Forward-auth, cookie stripping, access modes, public paths |
-| M4 | Templates | Vaultwarden and Umami pass the verification workflow |
-| M5 | Agent interface | MCP server, CLI, `AGENTS.md`. Demo 3 works end to end with Claude Code or Cursor |
+| M1 | Minimal control plane | GitHub login, org = tenant, API, desired state, tenant agent pulling and applying. **Prototype done 2026-11-06** with email/password login and sb-control inside the tenant (D-014, D-015). GitHub login open. |
+| M2 | Deploys | Container image and GitHub repo (Railpack) deploy to `<app>.<tenant>.slicedbread.cloud` with TLS. **Done 2026-11-06** (images, public repos, uploaded directories; tenants on test.slicedbread.dev for now) |
+| M3 | Login wall | Forward-auth, cookie stripping, access modes, public paths. **Done 2026-11-06**, verified live, plus approvals and browser-based CLI login |
+| M4 | Templates | Vaultwarden and Umami pass the verification workflow. **Templates done 2026-11-06**; the automated verification workflow is not built yet (checked by hand and by agent tests) |
+| M5 | Agent interface | MCP server, CLI, `AGENTS.md`. Demo 3 works end to end with Claude Code or Cursor. **CLI and skill file done 2026-11-06**, tested by agents given only the skill file. MCP server not built |
 | M6 | Recovery | Nightly backups, nightly restore tests with alerts, node replacement |
 
 M6 is required before any real data, including our own Vaultwarden, moves onto the platform.

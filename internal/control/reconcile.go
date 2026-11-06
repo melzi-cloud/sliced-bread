@@ -159,7 +159,7 @@ func (s *Server) startBuild(ctx context.Context, a *apps.App) error {
 	if err := s.kube.Apply(ctx, buildJob(s.cfg, a, id, push, s.uploadURL(a))); err != nil {
 		a.Build.Phase, a.Build.Message = "failed", "could not create build job: "+err.Error()
 	}
-	return s.saveApp(ctx, a)
+	return s.saveInternal(ctx, a)
 }
 
 func buildJob(cfg Config, a *apps.App, id, pushRef, uploadURL string) kube.Obj {
@@ -320,14 +320,14 @@ func (s *Server) tick(ctx context.Context) {
 			continue
 		}
 		if s.checkBuild(ctx, cur) {
-			if err := s.saveApp(ctx, cur); err != nil {
+			if err := s.saveInternal(ctx, cur); err != nil {
 				s.logf("tick: save %s: %v", cur.Name, err)
 			} else if err := s.reconcile(ctx, cur); err != nil {
 				s.logf("tick: reconcile %s: %v", cur.Name, err)
 			}
 		}
 		if changed := s.runHooks(ctx, cur); changed {
-			if err := s.saveApp(ctx, cur); err != nil {
+			if err := s.saveInternal(ctx, cur); err != nil {
 				s.logf("tick: save hooks %s: %v", cur.Name, err)
 			}
 		}
@@ -339,24 +339,26 @@ func (s *Server) tick(ctx context.Context) {
 
 // AppStatus is what the CLI shows for an app.
 type AppStatus struct {
-	Name        string            `json:"name"`
-	URL         string            `json:"url"`
-	Template    string            `json:"template,omitempty"`
-	Source      string            `json:"source"`
-	Access      string            `json:"access"`
-	PublicPaths []string          `json:"publicPaths,omitempty"`
-	State       string            `json:"state"`
-	Message     string            `json:"message,omitempty"`
-	Build       *apps.BuildState  `json:"build,omitempty"`
-	EnvKeys     []string          `json:"envKeys,omitempty"`
-	Env         map[string]string `json:"env,omitempty"` // plain values; secrets are only listed in secretKeys
-	Pending     []string          `json:"pendingApprovals,omitempty"`
-	Storage     string            `json:"storage,omitempty"`
-	SecretKeys  []string          `json:"secretKeys,omitempty"`
-	Settings    map[string]string `json:"settings,omitempty"`
-	Actions     []apps.Action     `json:"actions,omitempty"`
-	Database    string            `json:"database,omitempty"`
-	Notes       string            `json:"notes,omitempty"`
+	Name         string            `json:"name"`
+	URL          string            `json:"url"`
+	Template     string            `json:"template,omitempty"`
+	Source       string            `json:"source"`
+	Access       string            `json:"access"`
+	PublicPaths  []string          `json:"publicPaths,omitempty"`
+	State        string            `json:"state"`
+	Message      string            `json:"message,omitempty"`
+	Build        *apps.BuildState  `json:"build,omitempty"`
+	EnvKeys      []string          `json:"envKeys,omitempty"`
+	Env          map[string]string `json:"env,omitempty"` // plain values; secrets are only listed in secretKeys
+	Pending      []string          `json:"pendingApprovals,omitempty"`
+	Storage      string            `json:"storage,omitempty"`
+	Serving      string            `json:"serving,omitempty"`      // image currently deployed
+	ServingBuild string            `json:"servingBuild,omitempty"` // build id currently deployed (source apps)
+	SecretKeys   []string          `json:"secretKeys,omitempty"`
+	Settings     map[string]string `json:"settings,omitempty"`
+	Actions      []apps.Action     `json:"actions,omitempty"`
+	Database     string            `json:"database,omitempty"`
+	Notes        string            `json:"notes,omitempty"`
 }
 
 func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
@@ -423,24 +425,57 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 		st.State, st.Message = "pending", "deployment not created yet"
 		return st
 	}
-	ready := kube.Num(dep, "status", "readyReplicas")
-	updated := kube.Num(dep, "status", "updatedReplicas")
-	if ready > 0 && updated > 0 && kube.Num(dep, "status", "unavailableReplicas") == 0 {
-		st.State = "running"
-	} else {
+	st.Serving = servingImage(dep)
+	if a.Upload != nil && a.Build != nil && a.Build.LastGood != "" {
+		st.ServingBuild = buildIDFromImage(st.Serving)
+	}
+	want := kube.Num(dep, "spec", "replicas")
+	settled := kube.Num(dep, "status", "observedGeneration") >= kube.Num(dep, "metadata", "generation") &&
+		kube.Num(dep, "status", "updatedReplicas") == want &&
+		kube.Num(dep, "status", "readyReplicas") == want &&
+		kube.Num(dep, "status", "unavailableReplicas") == 0 &&
+		kube.Num(dep, "status", "replicas") == want &&
+		(a.CurrentImage() == "" || st.Serving == a.CurrentImage())
+	ready := kube.Num(dep, "status", "readyReplicas") > 0
+	switch {
+	case a.Build != nil && a.Build.Phase == "running":
+		st.State, st.Message = "updating", "new build "+a.Build.ID+" running; the previous version keeps serving"
+	case !settled && ready:
+		st.State, st.Message = "updating", "rolling out the new version; the previous version keeps serving until it is ready"
+		if p := s.podProblem(ctx, ns); p != "" {
+			st.Message += " (new version: " + p + ")"
+		}
+	case !settled:
 		st.State = "starting"
 		st.Message = s.podProblem(ctx, ns)
 		if st.Message == "" && a.Database && st.Database != "Cluster in healthy state" {
 			st.Message = "waiting for database: " + st.Database
 		}
-	}
-	if a.Build != nil && a.Build.Phase == "running" && st.State == "running" {
-		st.Message = "a new build is running; the previous version keeps serving"
-	}
-	if a.Build != nil && a.Build.Phase == "failed" && a.Build.LastGood != "" {
-		st.Message = "latest build failed, previous version still serving; see: sb logs " + a.Name + " --build"
+	case a.Build != nil && a.Build.Phase == "failed" && a.Build.LastGood != "":
+		st.State, st.Message = "update-failed", "latest build "+a.Build.ID+" failed; the previous version is still serving. See: sb logs "+a.Name+" --build"
+	case a.Template == "umami" && a.Hooks["admin-password"] != "set":
+		st.State, st.Message = "configuring", "finishing template setup (replacing the default admin password)"
+	default:
+		st.State = "running"
 	}
 	return st
+}
+
+func servingImage(dep kube.Obj) string {
+	for _, c := range kube.Slice(dep, "spec", "template", "spec", "containers") {
+		m, _ := c.(map[string]any)
+		if kube.Str(m, "name") == "app" {
+			return kube.Str(m, "image")
+		}
+	}
+	return ""
+}
+
+func buildIDFromImage(img string) string {
+	if i := strings.LastIndex(img, ":"); i >= 0 {
+		return img[i+1:]
+	}
+	return ""
 }
 
 // podProblem summarises why pods are not ready.
