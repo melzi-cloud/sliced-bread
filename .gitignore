@@ -1,0 +1,8 @@
+.env
+.env.*
+*.kubeconfig
+kubeconfig*
+*.tfstate*
+.DS_Store
+node_modules/
+dist/
