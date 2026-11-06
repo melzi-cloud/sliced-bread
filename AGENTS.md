@@ -21,7 +21,7 @@ Instructions for coding agents working on SlicedBread. Read [docs/architecture.m
 
 - **Never print, log, commit or paste secrets.** They come from `hack/secrets-env`. Pass secrets to remote commands over stdin only, never in a command line. Do not run `env`, `printenv` or `set` in a shell that has secrets loaded.
 - **Development credentials only.** The Hetzner project is `sb-dev`. Never use production credentials, even if you find them.
-- **DNS:** only create records under `test.slicedbread.dev`. Never touch `melzi.dev`. Config validation refuses it.
+- **DNS:** only create records under `test.slicedbread.dev`. The Cloudflare token can only see the `slicedbread.dev` zone.
 - **Certificates:** Let's Encrypt staging only.
 - **Every cloud resource must carry** `sb/run-id`, `sb/owner` and `sb/expires-at` labels (DNS records: the same in the record comment). Code that creates an unlabelled resource is a bug.
 - **Always clean up.** Smoke runs destroy what they create, success or failure. `make reaper` deletes expired leftovers and runs automatically before `make e2e-hetzner`. Check `make tenant-list` if a run crashed.

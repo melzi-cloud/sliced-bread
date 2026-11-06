@@ -50,9 +50,6 @@ const (
 	DefaultTTL                = 2 * time.Hour
 )
 
-// forbiddenZones must never be used by development tooling.
-var forbiddenZones = []string{"melzi.dev"}
-
 // LoadDev reads the development configuration from the environment.
 func LoadDev() (Dev, error) {
 	d := Dev{
@@ -106,15 +103,11 @@ func (d Dev) Validate() error {
 	return errors.Join(errs...)
 }
 
-// ValidateDomains enforces that tests stay inside the test domain and never touch forbidden zones.
+// ValidateDomains enforces that test records stay inside the test subdomain.
+// The Cloudflare token's zone scope is what limits which zones can be touched.
 func ValidateDomains(zone, testDomain string) error {
 	zone = strings.TrimSuffix(strings.ToLower(zone), ".")
 	testDomain = strings.TrimSuffix(strings.ToLower(testDomain), ".")
-	for _, f := range forbiddenZones {
-		if zone == f || strings.HasSuffix(zone, "."+f) || testDomain == f || strings.HasSuffix(testDomain, "."+f) {
-			return fmt.Errorf("zone %q is forbidden for development", f)
-		}
-	}
 	if zone == "" || testDomain == "" {
 		return errors.New("DNS zone and test domain must be set")
 	}

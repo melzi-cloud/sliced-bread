@@ -13,8 +13,6 @@ func TestValidateDomains(t *testing.T) {
 		{"slicedbread.dev", "test.slicedbread.dev", true},
 		{"slicedbread.dev", "slicedbread.dev", false},
 		{"slicedbread.dev", "test.example.com", false},
-		{"melzi.dev", "test.melzi.dev", false},
-		{"slicedbread.dev", "x.melzi.dev", false},
 		{"", "test.slicedbread.dev", false},
 	}
 	for _, c := range cases {

@@ -27,7 +27,7 @@ func TestRenderUserDataInit(t *testing.T) {
 	for _, want := range []string{
 		"#cloud-config", "ed25519_private: |", "    -----BEGIN OPENSSH PRIVATE KEY-----",
 		"--cluster-init", "INSTALL_K3S_VERSION='v1.37.2+k3s1'", "--disable servicelb", "--disable local-storage",
-		"/var/lib/rancher/k3s/server/manifests/sb-traefik-config.yaml", "nodePort: 30443", "--token-file /etc/sb/k3s-token",
+		"/var/lib/rancher/k3s/server/manifests/sb-traefik-config.yaml", "nodePort: 30443", "--token-file /etc/sb/k3s-token", "/etc/rancher/k3s/registries.yaml", "http://10.43.200.200:5000",
 	} {
 		if !strings.Contains(ud, want) {
 			t.Errorf("user data missing %q", want)

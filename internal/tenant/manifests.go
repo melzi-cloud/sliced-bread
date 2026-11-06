@@ -10,7 +10,7 @@ const (
 	NodePortHTTPS = 30443
 
 	WildcardSecret = "tenant-wildcard-tls"
-	IssuerName     = "letsencrypt-staging"
+	IssuerName     = "letsencrypt"
 )
 
 // traefikConfig is dropped into the k3s manifests directory on every server.

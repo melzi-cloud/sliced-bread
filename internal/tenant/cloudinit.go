@@ -41,6 +41,11 @@ ssh_keys:
 {{indent 4 .HostKeyPriv}}
   ed25519_public: {{.HostKeyPub}}
 write_files:
+  - path: /etc/rancher/k3s/registries.yaml
+    permissions: "0600"
+    owner: root:root
+    content: |
+{{indent 6 .Registries}}
   - path: /etc/sb/k3s-token
     permissions: "0600"
     owner: root:root
@@ -119,8 +124,9 @@ func RenderUserData(c NodeConfig) (string, error) {
 	var out bytes.Buffer
 	err := userDataTmpl.Execute(&out, struct {
 		NodeConfig
-		Script string
-	}{c, script.String()})
+		Script     string
+		Registries string
+	}{c, script.String(), registriesYAML})
 	if err != nil {
 		return "", err
 	}

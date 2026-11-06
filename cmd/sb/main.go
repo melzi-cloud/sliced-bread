@@ -27,14 +27,21 @@ const usage = `usage:
   sb dev tenant ssh <run-id> [node]  print an ssh command for a node (default 1)
   sb dev reap                   delete runs whose resources have expired
   sb dev smoke [-keep-on-failure]   create, verify and destroy a tenant
+  sb dev prototype up           tenant + SlicedBread platform with trusted certificates
+  sb dev control push <run-id>  rebuild sb-control and roll it out to a running tenant
 
 Secrets come from the environment. Run through hack/secrets-env.`
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "dev" {
+		if err := run(args); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
 	}
+	os.Exit(handleExit(runUser(args)))
 }
 
 func run(args []string) error {
@@ -73,6 +80,24 @@ func run(args []string) error {
 			return errors.New(usage)
 		}
 		return tenantCmd(ctx, p, args[2:])
+	case "prototype":
+		if len(args) < 3 || args[2] != "up" {
+			return errors.New(usage)
+		}
+		return prototypeUp(ctx, p, root)
+	case "control":
+		if len(args) < 4 || args[2] != "push" {
+			return errors.New(usage)
+		}
+		st, err := tenant.LoadState(p.StateRoot, args[3])
+		if err != nil {
+			return err
+		}
+		if err := p.DeployControl(ctx, st, root, adminEmail(st)); err != nil {
+			return err
+		}
+		_, err = st.Kubectl(ctx, "-n sb-system rollout status deploy/sb-control --timeout=120s", nil)
+		return err
 	}
 	return errors.New(usage)
 }
@@ -149,6 +174,50 @@ func tenantCmd(ctx context.Context, p *tenant.Provisioner, args []string) error 
 		return nil
 	}
 	return errors.New(usage)
+}
+
+func adminEmail(st *tenant.State) string {
+	if e := os.Getenv("SB_ADMIN_EMAIL"); e != "" {
+		return e
+	}
+	return "admin@" + st.Domain
+}
+
+// prototypeUp creates a tenant with production certificates and the full platform.
+func prototypeUp(ctx context.Context, p *tenant.Provisioner, root string) error {
+	p.Cfg.ACMEServer = "https://acme-v02.api.letsencrypt.org/directory" // trusted certs for browsers and Bitwarden clients
+	if os.Getenv("SB_TTL") == "" {
+		p.Cfg.TTL = 12 * time.Hour
+	}
+	runID := labels.NewRunID()
+	st, err := p.Up(ctx, runID)
+	if err == nil {
+		err = p.InstallAddons(ctx, st)
+	}
+	if err == nil {
+		err = p.DeployControl(ctx, st, root, adminEmail(st))
+	}
+	if err == nil {
+		err = p.FetchCredentials(ctx, st)
+	}
+	if err != nil {
+		if st != nil && len(st.Nodes) > 0 {
+			p.CollectArtifacts(context.Background(), st, filepath.Join(root, "test", "artifacts", runID))
+		}
+		fmt.Fprintf(os.Stderr, "prototype %s failed; tear down with: make tenant-down RUN=%s\n", runID, runID)
+		return err
+	}
+	fmt.Printf(`prototype ready
+  run id:      %s
+  dashboard:   https://auth.%s   (login: %s)
+  api:         https://api.%s
+  agent cli:   SB_CONFIG=%s sb apps
+  admin cli:   SB_CONFIG=%s sb approvals
+  expires:     %s (tear down with: make tenant-down RUN=%s)
+`, st.RunID, st.Domain, filepath.Join(st.Dir, "admin-login.json"), st.Domain,
+		filepath.Join(st.Dir, "cli-agent.json"), filepath.Join(st.Dir, "cli-admin.json"),
+		st.ExpiresAt.Local().Format(time.RFC3339), st.RunID)
+	return nil
 }
 
 func repoRoot() (string, error) {

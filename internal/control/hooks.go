@@ -1,0 +1,152 @@
+package control
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/melzi-cloud/sliced-bread/internal/apps"
+)
+
+var hookHTTP = &http.Client{Timeout: 20 * time.Second}
+
+func internalURL(a *apps.App) string {
+	return "http://web." + apps.Namespace(a.Name) + ".svc.cluster.local"
+}
+
+func postJSON(ctx context.Context, url, bearer string, in, out any) (int, error) {
+	b, _ := json.Marshal(in)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := hookHTTP.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 300 {
+		return resp.StatusCode, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if out != nil {
+		if err := json.Unmarshal(body, out); err != nil {
+			return resp.StatusCode, err
+		}
+	}
+	return resp.StatusCode, nil
+}
+
+type umamiLogin struct {
+	Token string `json:"token"`
+	User  struct {
+		ID string `json:"id"`
+	} `json:"user"`
+}
+
+func umamiLoginAs(ctx context.Context, a *apps.App, password string) (umamiLogin, error) {
+	var out umamiLogin
+	_, err := postJSON(ctx, internalURL(a)+"/api/auth/login", "", map[string]string{"username": "admin", "password": password}, &out)
+	if err == nil && out.Token == "" {
+		err = fmt.Errorf("login returned no token")
+	}
+	return out, err
+}
+
+// runHooks runs template lifecycle hooks once the app is running. Returns true if the app changed.
+func (s *Server) runHooks(ctx context.Context, a *apps.App) bool {
+	if a.Template != "umami" || (a.Hooks != nil && a.Hooks["admin-password"] == "set") {
+		return false
+	}
+	if st := s.status(ctx, a); st.State != "running" {
+		return false
+	}
+	vals, err := s.appSecret(ctx, a)
+	if err != nil || vals["UMAMI_ADMIN_PASSWORD"] == "" {
+		return false
+	}
+	newPW := vals["UMAMI_ADMIN_PASSWORD"]
+	if _, err := umamiLoginAs(ctx, a, newPW); err == nil {
+		return markHook(a, "admin-password", "set")
+	}
+	login, err := umamiLoginAs(ctx, a, "umami") // Umami's documented default
+	if err != nil {
+		s.logf("umami %s: default login failed: %v", a.Name, err)
+		return false
+	}
+	if _, err := postJSON(ctx, internalURL(a)+"/api/users/"+login.User.ID, login.Token, map[string]string{"password": newPW}, nil); err != nil {
+		s.logf("umami %s: set admin password: %v", a.Name, err)
+		return false
+	}
+	s.logf("umami %s: default admin password replaced", a.Name)
+	return markHook(a, "admin-password", "set")
+}
+
+func markHook(a *apps.App, k, v string) bool {
+	if a.Hooks == nil {
+		a.Hooks = map[string]string{}
+	}
+	a.Hooks[k] = v
+	return true
+}
+
+// runAction executes a template action.
+func (s *Server) runAction(ctx context.Context, a *apps.App, action string, input map[string]string) (map[string]any, error) {
+	switch a.Template + "/" + action {
+	case "umami/create_website":
+		if a.Hooks["admin-password"] != "set" {
+			return nil, fmt.Errorf("umami is still starting (admin setup not finished); run `sb wait %s` and retry", a.Name)
+		}
+		name, domain := strings.TrimSpace(input["name"]), strings.TrimSpace(input["domain"])
+		domain = strings.TrimPrefix(strings.TrimPrefix(domain, "https://"), "http://")
+		domain = strings.TrimSuffix(domain, "/")
+		if name == "" || domain == "" {
+			return nil, fmt.Errorf("create_website needs input name and domain, e.g. --input name=Shop --input domain=shop.example.com")
+		}
+		vals, err := s.appSecret(ctx, a)
+		if err != nil {
+			return nil, err
+		}
+		login, err := umamiLoginAs(ctx, a, vals["UMAMI_ADMIN_PASSWORD"])
+		if err != nil {
+			return nil, fmt.Errorf("umami login: %w", err)
+		}
+		var site struct {
+			ID     string `json:"id"`
+			Name   string `json:"name"`
+			Domain string `json:"domain"`
+		}
+		if _, err := postJSON(ctx, internalURL(a)+"/api/websites", login.Token, map[string]string{"name": name, "domain": domain}, &site); err != nil {
+			return nil, fmt.Errorf("create website: %w", err)
+		}
+		script := "https://" + apps.Host(a.Name, s.cfg.Domain) + "/script.js"
+		return map[string]any{
+			"website_id": site.ID,
+			"name":       site.Name,
+			"domain":     site.Domain,
+			"script_url": script,
+			"snippet":    fmt.Sprintf(`<script defer src="%s" data-website-id="%s"></script>`, script, site.ID),
+			"next":       "Add the snippet inside <head> of the site (for a Vite/React app: index.html), then redeploy that app.",
+		}, nil
+	case "umami/dashboard_login":
+		vals, err := s.appSecret(ctx, a)
+		if err != nil {
+			return nil, err
+		}
+		pw := vals["UMAMI_ADMIN_PASSWORD"]
+		if a.Hooks["admin-password"] != "set" {
+			pw = "umami (default, will be replaced once the app is running)"
+		}
+		return map[string]any{"url": "https://" + apps.Host(a.Name, s.cfg.Domain), "username": "admin", "password": pw}, nil
+	}
+	return nil, fmt.Errorf("app %s (template %q) has no action %q", a.Name, a.Template, action)
+}
