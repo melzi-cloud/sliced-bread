@@ -1,5 +1,6 @@
 .env
 .env.*
+dev.env
 *.kubeconfig
 kubeconfig*
 *.tfstate*

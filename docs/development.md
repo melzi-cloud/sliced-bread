@@ -23,7 +23,10 @@ Production gets its own Hetzner project and credentials later. Test tooling must
 ## Secrets
 
 - Stored in a dedicated macOS keychain, `~/Library/Keychains/slicedbread-dev.keychain-db`, separate from the login keychain. It has no auto-lock and must be unlocked once after each reboot.
-- Item names: `sb-dev-hcloud`, `sb-dev-cloudflare`, `sb-dev-s3-key`, `sb-dev-s3-secret`.
+- Item names: `sb-dev-hcloud`, `sb-dev-cloudflare` (account-owned API token), `sb-dev-cloudflare-id` (Cloudflare account ID), `sb-dev-s3-key`, `sb-dev-s3-secret`, `sb-dev-github` (fine-grained token for the repo).
+- Non-secret settings (S3 endpoint, bucket, region, DNS zone) live in a gitignored `dev.env` at the repo root.
+- Cloudflare account-owned tokens are verified at `/accounts/{account_id}/tokens/verify`, not `/user/tokens/verify`.
+- Git pushes use a one-off `GIT_ASKPASS` helper reading `sb-dev-github` with `credential.helper` disabled, so the token never lands in the remote URL, git config or another keychain.
 - `hack/secrets-env` loads them into the environment of a single command. Scripts never print secret values, and never write them to files or logs.
 - If the keychain is locked, scripts stop with a clear message.
 - Never paste secrets into an agent chat. Chat text is sent to the model as written.
