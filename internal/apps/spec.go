@@ -48,8 +48,9 @@ type Repo struct {
 
 // Upload is source code uploaded by the CLI and stored by the control plane.
 type Upload struct {
-	ID    string `json:"id"`
-	Bytes int64  `json:"bytes,omitempty"`
+	ID     string `json:"id"`
+	Bytes  int64  `json:"bytes,omitempty"`
+	SHA256 string `json:"sha256,omitempty"` // first 12 hex chars of the tarball hash
 }
 
 // Builds reports whether the app is built from source (repo or upload).

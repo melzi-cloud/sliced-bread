@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
@@ -60,10 +61,19 @@ func (s *Server) apiMux() http.Handler {
 	m.HandleFunc("POST /v1/apps/{name}/redeploy", s.apiRedeploy)
 	m.HandleFunc("GET /v1/apps/{name}/logs", s.apiLogs)
 	m.HandleFunc("POST /v1/apps/{name}/actions/{action}", s.apiAction)
+	m.HandleFunc("GET /v1/apps/{name}/check", s.apiCheck)
 	m.HandleFunc("POST /v1/uploads", s.apiUpload)
 	m.HandleFunc("GET /v1/approvals", s.apiListApprovals)
+	m.HandleFunc("GET /v1/approvals/{id}", s.apiGetApproval)
 	m.HandleFunc("POST /v1/approvals/{id}/{decision}", s.apiDecide)
+	public := http.NewServeMux()
+	public.HandleFunc("POST /v1/device", s.apiDeviceStart)
+	public.HandleFunc("GET /v1/device/{poll}", s.apiDevicePoll)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/device") {
+			public.ServeHTTP(w, r)
+			return
+		}
 		scope := s.auth.TokenScope(r)
 		if scope == "" {
 			fail(w, http.StatusUnauthorized, "missing or invalid API token", "run: sb login")
@@ -75,8 +85,9 @@ func (s *Server) apiMux() http.Handler {
 
 func (s *Server) apiWhoami(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"scope": scopeOf(r), "domain": s.cfg.Domain,
-		"dashboard": "https://auth." + s.cfg.Domain, "approvals": "https://auth." + s.cfg.Domain + "/approvals",
+		"scope": scopeOf(r), "domain": s.cfg.Domain, "team": s.auth.Emails(),
+		"wallAdmits": "signed-in team members listed in team",
+		"dashboard":  "https://auth." + s.cfg.Domain, "approvals": "https://auth." + s.cfg.Domain + "/approvals",
 		"appUrlPattern": "https://<app>." + s.cfg.Domain,
 	})
 }
@@ -134,6 +145,8 @@ type DeployRequest struct {
 	Access      string            `json:"access,omitempty"`
 	PublicPaths []string          `json:"publicPaths,omitempty"`
 	Settings    map[string]string `json:"settings,omitempty"`
+	Database    bool              `json:"database,omitempty"`
+	HealthPath  string            `json:"healthPath,omitempty"`
 }
 
 // needsApproval reports why an agent cannot apply this app state directly, or "".
@@ -176,8 +189,7 @@ func needsApproval(scope string, prev, next *apps.App) string {
 	if len(reasons) == 0 {
 		return ""
 	}
-	b, _ := json.Marshal(reasons)
-	return string(b)
+	return strings.Join(reasons, "; ")
 }
 
 func (s *Server) approvalResponse(w http.ResponseWriter, ap *Approval) {
@@ -186,7 +198,7 @@ func (s *Server) approvalResponse(w http.ResponseWriter, ap *Approval) {
 		"state":      "pending",
 		"summary":    ap.Summary,
 		"approveUrl": "https://auth." + s.cfg.Domain + "/approvals",
-		"hint":       "A human must approve this at the approveUrl (or run `sb approve " + ap.ID + "` with an admin token). Check with: sb approvals",
+		"hint":       "A human must approve this. Give the user the approve URL. Then wait with: sb approvals --wait " + ap.ID,
 	})
 }
 
@@ -201,12 +213,12 @@ func (s *Server) apiCreateApp(w http.ResponseWriter, r *http.Request) {
 		Env: req.Env, Settings: req.Settings, PublicPaths: req.PublicPaths, Access: apps.AccessWall,
 	}
 	if req.Upload != "" {
-		size, ok := s.uploadSize(req.Upload)
+		up, ok := s.uploadInfo(req.Upload)
 		if !ok {
 			fail(w, 400, "unknown upload "+req.Upload, "upload the directory again with: sb deploy --dir")
 			return
 		}
-		a.Upload = &apps.Upload{ID: req.Upload, Bytes: size}
+		a.Upload = up
 	}
 	envKeys := []string{}
 	for k := range req.Env {
@@ -232,6 +244,18 @@ func (s *Server) apiCreateApp(w http.ResponseWriter, r *http.Request) {
 	if req.Access != "" {
 		a.Access = req.Access
 	}
+	if req.Database {
+		a.Database = true
+		if a.Env == nil {
+			a.Env = map[string]string{}
+		}
+		if _, set := a.Env["DATABASE_URL"]; !set {
+			a.Env["DATABASE_URL"] = "${db.url}"
+		}
+	}
+	if req.HealthPath != "" {
+		a.HealthPath = req.HealthPath
+	}
 	for k := range req.Secrets {
 		if _, plain := a.Env[k]; plain {
 			fail(w, 400, "key "+k+" is set both as env and secret", "")
@@ -255,7 +279,7 @@ func (s *Server) apiCreateApp(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "this deploy needs human approval, so secrets cannot be included", "deploy without secrets, then set them with: sb env set --secret after approval")
 			return
 		}
-		ap, err := s.requestApproval(ctx, "create", a.Name, "create app "+a.Name+": "+why, a)
+		ap, err := s.requestApproval(ctx, "create", a.Name, "create app "+a.Name+": "+why, a, scopeOf(r))
 		if err != nil {
 			fail(w, 500, err.Error(), "")
 			return
@@ -291,7 +315,7 @@ func (s *Server) apiDeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if scopeOf(r) != ScopeAdmin {
-		ap, err := s.requestApproval(r.Context(), "delete", a.Name, "delete app "+a.Name+" and all its data", nil)
+		ap, err := s.requestApproval(r.Context(), "delete", a.Name, "delete app "+a.Name+" and all its data", nil, scopeOf(r))
 		if err != nil {
 			fail(w, 500, err.Error(), "")
 			return
@@ -381,7 +405,7 @@ func (s *Server) apiEnv(w http.ResponseWriter, r *http.Request) {
 func (s *Server) applyOrApprove(w http.ResponseWriter, r *http.Request, prev, next *apps.App, summary string) {
 	ctx := r.Context()
 	if why := needsApproval(scopeOf(r), prev, next); why != "" {
-		ap, err := s.requestApproval(ctx, "update", next.Name, summary+": "+why, next)
+		ap, err := s.requestApproval(ctx, "update", next.Name, summary+": "+why, next, scopeOf(r))
 		if err != nil {
 			fail(w, 500, err.Error(), "")
 			return
@@ -487,12 +511,12 @@ func (s *Server) apiRedeploy(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, a.Name+" was not deployed from a directory", "")
 			return
 		}
-		size, ok := s.uploadSize(req.Upload)
+		up, ok := s.uploadInfo(req.Upload)
 		if !ok {
 			fail(w, 400, "unknown upload "+req.Upload, "")
 			return
 		}
-		a.Upload = &apps.Upload{ID: req.Upload, Bytes: size}
+		a.Upload = up
 	}
 	if a.Builds() {
 		if a.Build != nil && a.Build.Phase == "running" {
@@ -597,12 +621,13 @@ func (s *Server) apiListApprovals(w http.ResponseWriter, r *http.Request) {
 		Kind        string `json:"kind"`
 		Summary     string `json:"summary"`
 		RequestedAt string `json:"requestedAt"`
+		RequestedBy string `json:"requestedBy,omitempty"`
 		State       string `json:"state"`
 		Result      string `json:"result,omitempty"`
 	}
 	out := []view{}
 	for _, ap := range list {
-		out = append(out, view{ap.ID, ap.App, ap.Kind, ap.Summary, ap.RequestedAt, ap.State, ap.Result})
+		out = append(out, view{ap.ID, ap.App, ap.Kind, ap.Summary, ap.RequestedAt, ap.RequestedBy, ap.State, ap.Result})
 	}
 	writeJSON(w, 200, map[string]any{"approvals": out, "approveUrl": "https://auth." + s.cfg.Domain + "/approvals"})
 }
@@ -636,4 +661,17 @@ func (s *Server) apiDecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, ap)
+}
+
+func (s *Server) apiGetApproval(w http.ResponseWriter, r *http.Request) {
+	ap, err := s.getApproval(r.Context(), r.PathValue("id"))
+	if kube.IsNotFound(err) {
+		fail(w, 404, "no approval "+r.PathValue("id"), "list with: sb approvals")
+		return
+	}
+	if err != nil {
+		fail(w, 500, err.Error(), "")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"id": ap.ID, "app": ap.App, "state": ap.State, "result": ap.Result, "summary": ap.Summary})
 }

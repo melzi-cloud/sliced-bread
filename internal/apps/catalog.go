@@ -2,8 +2,11 @@ package apps
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 )
+
+var domainRE = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$`)
 
 // Template is a catalog entry. Apply fills defaults into a new app.
 type Template struct {
@@ -42,13 +45,17 @@ var Catalog = map[string]*Template{
 		Description: "Password manager compatible with Bitwarden apps and browser extensions.",
 		Access:      AccessAppAuth,
 		Settings: []Setting{{
-			Name: "signups", Description: "Allow new accounts to register. Turn on to create your account, then turn off.",
+			Name: "signups", Description: "Allow new accounts to register. Closes automatically 15 minutes after opening.",
 			Values: []string{"false", "true"}, Default: "false", ApprovalFor: []string{"true"},
+		}, {
+			Name: "signup_domain", Description: "Only allow signups with email addresses at this domain (empty: any). Without email verification this narrows, but does not prove, who signs up.",
+			Values: nil, Default: "",
 		}},
-		Notes: "Runs in app-auth mode: the SlicedBread login wall is off because Bitwarden apps and extensions cannot pass it. " +
-			"Signups are off by default and the admin page is disabled. To create the first account, set signups=true " +
-			"(needs human approval), register at the app URL, then set signups=false.",
-		ForbidEnv: []string{"ADMIN_TOKEN", "SIGNUPS_ALLOWED"},
+		Notes: "Runs in app-auth mode (set by the template, no approval needed): the SlicedBread login wall is off because Bitwarden apps and extensions cannot pass it. " +
+			"Signups are off by default, the admin page is disabled and password hints are hidden. To create the first account: set signups=true " +
+			"(needs human approval), the user registers at the app URL, then set signups=false (no approval needed). Signups also close automatically 15 minutes after opening. " +
+			"Clients: in the Bitwarden app or extension choose Self-hosted and enter the app URL. Data lives on a persistent volume.",
+		ForbidEnv: []string{"ADMIN_TOKEN", "SIGNUPS_ALLOWED", "SIGNUPS_DOMAINS_WHITELIST"},
 		apply: func(a *App) {
 			a.Image = "vaultwarden/server:1.37.5"
 			a.Port = 8080
@@ -115,7 +122,7 @@ func ApplyTemplate(a *App) error {
 			v = s.Default
 			a.Settings[s.Name] = v
 		}
-		if !contains(s.Values, v) {
+		if s.Values != nil && !contains(s.Values, v) {
 			return fmt.Errorf("setting %s must be one of %v", s.Name, s.Values)
 		}
 	}
@@ -126,6 +133,14 @@ func ApplyTemplate(a *App) error {
 	}
 	if t.Name == "vaultwarden" {
 		a.Env["SIGNUPS_ALLOWED"] = a.Settings["signups"]
+		if d := a.Settings["signup_domain"]; d != "" {
+			if !domainRE.MatchString(d) {
+				return fmt.Errorf("signup_domain %q is not a domain", d)
+			}
+			a.Env["SIGNUPS_DOMAINS_WHITELIST"] = d
+		} else {
+			delete(a.Env, "SIGNUPS_DOMAINS_WHITELIST")
+		}
 	}
 	return nil
 }

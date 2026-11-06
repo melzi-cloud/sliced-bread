@@ -141,6 +141,7 @@ func (s *Server) deleteApp(ctx context.Context, name string) error {
 	if err := s.kube.Delete(ctx, "v1", "Namespace", "", apps.Namespace(name)); err != nil {
 		return err
 	}
+	s.obsoleteApprovals(ctx, name, "app was deleted")
 	return s.kube.Delete(ctx, "slicedbread.dev/v1alpha1", "App", "", name)
 }
 
@@ -179,8 +180,7 @@ if [ -f Dockerfile ]; then
   echo dockerfile > /work/plan/mode
 else
   if [ -f package-lock.json ] && { [ -f bun.lockb ] || [ -f bun.lock ]; }; then
-    echo "note: both package-lock.json and a bun lockfile found. Lovable exports often carry a stale bun.lockb,"
-    echo "      so this build uses npm with package-lock.json. Delete package-lock.json to build with bun instead."
+    echo "note: using npm (package-lock.json); the bun lockfile is ignored because Lovable exports often carry a stale one. No action needed."
     rm -f bun.lockb bun.lock
   fi
   mkdir -p /tmp/rp
@@ -349,6 +349,9 @@ type AppStatus struct {
 	Message     string            `json:"message,omitempty"`
 	Build       *apps.BuildState  `json:"build,omitempty"`
 	EnvKeys     []string          `json:"envKeys,omitempty"`
+	Env         map[string]string `json:"env,omitempty"` // plain values; secrets are only listed in secretKeys
+	Pending     []string          `json:"pendingApprovals,omitempty"`
+	Storage     string            `json:"storage,omitempty"`
 	SecretKeys  []string          `json:"secretKeys,omitempty"`
 	Settings    map[string]string `json:"settings,omitempty"`
 	Actions     []apps.Action     `json:"actions,omitempty"`
@@ -361,15 +364,28 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 		Name: a.Name, URL: "https://" + apps.Host(a.Name, s.cfg.Domain), Template: a.Template,
 		Access: a.Access, PublicPaths: a.PublicPaths, Build: a.Build, Settings: a.Settings, SecretKeys: a.SecretKeys,
 	}
-	for k := range a.Env {
+	st.Env = map[string]string{}
+	for k, v := range a.Env {
 		st.EnvKeys = append(st.EnvKeys, k)
+		st.Env[k] = v
 	}
 	sort.Strings(st.EnvKeys)
+	st.Pending = s.pendingFor(ctx, a.Name)
+	var vols []string
+	for _, v := range a.Volumes {
+		vols = append(vols, v.Path)
+	}
+	if a.Database {
+		vols = append(vols, "postgres")
+	}
+	if len(vols) > 0 {
+		st.Storage = "persistent volumes (" + strings.Join(vols, ", ") + ") survive restarts and redeploys; deleting the app deletes them; no backups yet in this prototype"
+	}
 	switch {
 	case a.Template != "":
 		st.Source = "template " + a.Template
 	case a.Upload != nil:
-		st.Source = fmt.Sprintf("uploaded directory (%s, %d KB)", a.Upload.ID, a.Upload.Bytes/1024)
+		st.Source = fmt.Sprintf("uploaded directory (%s, %d KB, sha256 %s)", a.Upload.ID, a.Upload.Bytes/1024, a.Upload.SHA256)
 	case a.Repo != nil:
 		st.Source = "repo " + a.Repo.URL
 		if a.Repo.Branch != "" {
@@ -396,7 +412,7 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 	if a.Builds() && a.Build != nil && a.Build.LastGood == "" {
 		switch a.Build.Phase {
 		case "running":
-			st.State, st.Message = "building", "first build in progress (usually 2-5 minutes); follow with: sb logs "+a.Name+" --build"
+			st.State, st.Message = "building", "first build in progress (usually under 5 minutes, faster when cached); follow with: sb logs "+a.Name+" --build"
 		case "failed":
 			st.State, st.Message = "build-failed", a.Build.Message
 		}

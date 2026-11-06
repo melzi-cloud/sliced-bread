@@ -58,11 +58,12 @@ func ConfigFromEnv() Config {
 
 // Server is the control plane.
 type Server struct {
-	cfg  Config
-	kube *kube.Client
-	auth *Auth
-	mu   sync.Mutex // serialises writes to app specs
-	logf func(string, ...any)
+	cfg     Config
+	kube    *kube.Client
+	auth    *Auth
+	devices deviceStore
+	mu      sync.Mutex // serialises writes to app specs
+	logf    func(string, ...any)
 }
 
 // New creates a server and loads or bootstraps auth state.
@@ -74,7 +75,7 @@ func New(ctx context.Context, cfg Config, k *kube.Client) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
 	}
-	return &Server{cfg: cfg, kube: k, auth: a, logf: log.Printf}, nil
+	return &Server{cfg: cfg, kube: k, auth: a, logf: log.Printf, devices: deviceStore{grants: map[string]*deviceGrant{}}}, nil
 }
 
 func (s *Server) params(a *apps.App, secretVersion string) apps.Params {
@@ -204,6 +205,8 @@ type Approval struct {
 	Kind        string    `json:"kind"`    // create, update, delete
 	Summary     string    `json:"summary"` // human readable
 	Desired     *apps.App `json:"desired,omitempty"`
+	BaseGen     int64     `json:"baseGeneration"` // app generation the request was based on; 0 for create
+	RequestedBy string    `json:"requestedBy,omitempty"`
 	RequestedAt string    `json:"requestedAt"`
 	State       string    `json:"state"` // pending, approved, denied
 	Result      string    `json:"result,omitempty"`
@@ -247,12 +250,42 @@ func (s *Server) getApproval(ctx context.Context, id string) (*Approval, error) 
 	return &cr.Spec, nil
 }
 
-func (s *Server) requestApproval(ctx context.Context, kind, app, summary string, desired *apps.App) (*Approval, error) {
+func (s *Server) requestApproval(ctx context.Context, kind, app, summary string, desired *apps.App, scope string) (*Approval, error) {
 	ap := &Approval{
 		ID: "ap-" + randID(6), App: app, Kind: kind, Summary: summary,
 		Desired: desired, RequestedAt: time.Now().UTC().Format(time.RFC3339), State: "pending",
+		RequestedBy: scope + " token",
+	}
+	if cur, err := s.getApp(ctx, app); err == nil {
+		ap.BaseGen = cur.Generation
 	}
 	return ap, s.saveApproval(ctx, ap)
+}
+
+// obsoleteApprovals marks pending approvals for an app as obsolete (e.g. after delete).
+func (s *Server) obsoleteApprovals(ctx context.Context, app, reason string) {
+	list, err := s.listApprovals(ctx)
+	if err != nil {
+		return
+	}
+	for _, ap := range list {
+		if ap.App == app && ap.State == "pending" {
+			ap.State, ap.Result = "obsolete", reason
+			s.saveApproval(ctx, ap)
+		}
+	}
+}
+
+// pendingFor lists pending approval summaries for an app.
+func (s *Server) pendingFor(ctx context.Context, app string) []string {
+	list, _ := s.listApprovals(ctx)
+	var out []string
+	for _, ap := range list {
+		if ap.App == app && ap.State == "pending" {
+			out = append(out, ap.ID+": "+ap.Summary)
+		}
+	}
+	return out
 }
 
 // executeApproval applies an approved change.
@@ -260,6 +293,22 @@ func (s *Server) executeApproval(ctx context.Context, ap *Approval) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var err error
+	cur, gerr := s.getApp(ctx, ap.App)
+	// Refuse stale approvals: the app changed, was deleted, or was recreated since the request.
+	stale := ""
+	switch {
+	case ap.Kind == "create" && gerr == nil:
+		stale = "an app with this name exists now"
+	case ap.Kind != "create" && gerr != nil:
+		stale = "the app no longer exists"
+	case ap.Kind != "create" && cur.Generation != ap.BaseGen:
+		stale = "the app changed after this was requested; ask again"
+	}
+	if stale != "" {
+		ap.State, ap.Result = "obsolete", stale
+		s.saveApproval(ctx, ap)
+		return fmt.Errorf("approval %s is obsolete: %s", ap.ID, stale)
+	}
 	switch ap.Kind {
 	case "delete":
 		err = s.deleteApp(ctx, ap.App)
@@ -267,7 +316,7 @@ func (s *Server) executeApproval(ctx context.Context, ap *Approval) error {
 		if ap.Desired == nil {
 			return fmt.Errorf("approval has no desired state")
 		}
-		if cur, gerr := s.getApp(ctx, ap.App); gerr == nil {
+		if gerr == nil {
 			ap.Desired.Build, ap.Desired.Hooks, ap.Desired.Generation = cur.Build, cur.Hooks, cur.Generation
 		}
 		if err = s.saveApp(ctx, ap.Desired); err == nil {

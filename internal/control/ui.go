@@ -3,6 +3,8 @@ package control
 import (
 	"html/template"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -25,7 +27,15 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 <button type="submit">Sign in</button></form>
 {{else}}
 <p class="muted">Signed in as {{.Email}} &middot; <a href="/logout">sign out</a> &middot; <a href="/">apps</a> &middot; <a href="/approvals">approvals</a></p>
-{{if eq .Page "approvals"}}
+{{if eq .Page "device"}}
+<h2>Connect a CLI</h2>
+{{if .Done}}<p>{{.Done}}</p>{{else}}
+<p>A command line client is asking for an <b>agent</b> token for this tenant. Agent tokens can deploy and configure apps; making things public or deleting them still needs your approval.</p>
+<p>Only continue if the code below matches what your terminal shows.</p>
+<p style="font-size:28px;letter-spacing:3px"><code>{{.Code}}</code></p>
+<form method="post" action="/device"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="code" value="{{.Code}}">
+<button name="decision" value="approve">Allow</button><button name="decision" value="deny">Deny</button></form>{{end}}
+{{else if eq .Page "approvals"}}
 <h2>Approvals</h2>
 {{if not .Approvals}}<p>No approvals.</p>{{end}}
 <table>{{range .Approvals}}<tr><td><code>{{.ID}}</code></td><td>{{.Summary}}<br><span class="muted">{{.RequestedAt}} &middot; {{.State}}{{if .Result}} &middot; {{.Result}}{{end}}</span></td>
@@ -41,6 +51,7 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 
 type pageData struct {
 	Page, Error, CSRF, RD, Email string
+	Code, Done                   string
 	Apps                         []AppStatus
 	Approvals                    []*Approval
 	Pending                      int
@@ -95,6 +106,27 @@ func (s *Server) uiMux() http.Handler {
 		}
 		s.render(w, pageData{Page: "apps", Email: email, Apps: sts, Pending: pending, CSRF: s.csrf(w, r)})
 	}))
+	m.HandleFunc("GET /device", s.requireSession(func(w http.ResponseWriter, r *http.Request, email string) {
+		code := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("code")))
+		s.render(w, pageData{Page: "device", Email: email, Code: code, CSRF: s.csrf(w, r)})
+	}))
+	m.HandleFunc("POST /device", s.requireSession(func(w http.ResponseWriter, r *http.Request, email string) {
+		if !s.checkCSRF(r) {
+			http.Error(w, "form expired, go back and retry", http.StatusForbidden)
+			return
+		}
+		code := strings.ToUpper(strings.TrimSpace(r.PostFormValue("code")))
+		allow := r.PostFormValue("decision") == "approve"
+		d := pageData{Page: "device", Email: email, Code: code, CSRF: s.csrf(w, r)}
+		if err := s.approveDevice(r.Context(), code, email, allow); err != nil {
+			d.Error = err.Error()
+		} else if allow {
+			d.Done = "Done. The CLI is now connected; you can close this tab."
+		} else {
+			d.Done = "Denied. The CLI did not get a token."
+		}
+		s.render(w, d)
+	}))
 	m.HandleFunc("GET /approvals", s.requireSession(func(w http.ResponseWriter, r *http.Request, email string) {
 		aps, err := s.listApprovals(r.Context())
 		d := pageData{Page: "approvals", Email: email, Approvals: aps, CSRF: s.csrf(w, r)}
@@ -122,7 +154,7 @@ func (s *Server) requireSession(h func(http.ResponseWriter, *http.Request, strin
 	return func(w http.ResponseWriter, r *http.Request) {
 		email, ok := s.auth.SessionFromRequest(r)
 		if !ok {
-			http.Redirect(w, r, "/login?rd="+"https://auth."+s.cfg.Domain+r.URL.Path, http.StatusFound)
+			http.Redirect(w, r, "/login?rd="+url.QueryEscape("https://auth."+s.cfg.Domain+r.URL.RequestURI()), http.StatusFound)
 			return
 		}
 		h(w, r, email)

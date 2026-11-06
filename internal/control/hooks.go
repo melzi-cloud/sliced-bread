@@ -62,8 +62,43 @@ func umamiLoginAs(ctx context.Context, a *apps.App, password string) (umamiLogin
 	return out, err
 }
 
+// signupWindow is how long Vaultwarden signups stay open.
+const signupWindow = 15 * time.Minute
+
+// vaultwardenHooks closes signups automatically after the window.
+func (s *Server) vaultwardenHooks(ctx context.Context, a *apps.App) bool {
+	if a.Settings["signups"] != "true" {
+		if a.Hooks["signups-opened-at"] != "" {
+			delete(a.Hooks, "signups-opened-at")
+			return true
+		}
+		return false
+	}
+	opened, err := time.Parse(time.RFC3339, a.Hooks["signups-opened-at"])
+	if err != nil {
+		return markHook(a, "signups-opened-at", time.Now().UTC().Format(time.RFC3339))
+	}
+	if time.Since(opened) < signupWindow {
+		return false
+	}
+	a.Settings["signups"] = "false"
+	if err := apps.ApplyTemplate(a); err != nil {
+		s.logf("vaultwarden %s: close signups: %v", a.Name, err)
+		return false
+	}
+	delete(a.Hooks, "signups-opened-at")
+	if err := s.reconcile(ctx, a); err != nil {
+		s.logf("vaultwarden %s: reconcile after closing signups: %v", a.Name, err)
+	}
+	s.logf("vaultwarden %s: signups closed automatically after %s", a.Name, signupWindow)
+	return true
+}
+
 // runHooks runs template lifecycle hooks once the app is running. Returns true if the app changed.
 func (s *Server) runHooks(ctx context.Context, a *apps.App) bool {
+	if a.Template == "vaultwarden" {
+		return s.vaultwardenHooks(ctx, a)
+	}
 	if a.Template != "umami" || (a.Hooks != nil && a.Hooks["admin-password"] == "set") {
 		return false
 	}

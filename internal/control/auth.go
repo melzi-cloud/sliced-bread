@@ -58,6 +58,22 @@ type Auth struct {
 	st     authState
 	key    []byte
 	domain string
+	kube   *kube.Client
+	ns     string
+}
+
+// MintToken creates and persists a new API token, returning its plaintext once.
+func (a *Auth) MintToken(ctx context.Context, name, scope string) (string, error) {
+	tok := "sbt_" + randString(24)
+	a.mu.Lock()
+	a.st.Tokens = append(a.st.Tokens, token{Name: name, Scope: scope, SHA256: sha(tok)})
+	a.mu.Unlock()
+	if a.kube == nil {
+		return tok, nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return tok, a.save(ctx, a.kube, a.ns)
 }
 
 func randString(n int) string {
@@ -77,7 +93,7 @@ func sha(s string) string {
 // user and two API tokens on first start. Initial credentials go to the
 // sb-bootstrap secret so the operator can fetch them once.
 func LoadAuth(ctx context.Context, k *kube.Client, ns, domain, adminEmail string) (*Auth, error) {
-	a := &Auth{domain: domain}
+	a := &Auth{domain: domain, kube: k, ns: ns}
 	var sec kube.Obj
 	err := k.Get(ctx, "v1", "Secret", ns, authSecret, &sec)
 	if err == nil {
@@ -130,6 +146,17 @@ func (a *Auth) save(ctx context.Context, k *kube.Client, ns string) error {
 		"type":     "Opaque",
 		"data":     kube.Obj{"state.json": base64.StdEncoding.EncodeToString(b)},
 	})
+}
+
+// Emails lists the team members the login wall admits.
+func (a *Auth) Emails() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := []string{}
+	for _, u := range a.st.Users {
+		out = append(out, u.Email)
+	}
+	return out
 }
 
 // TokenScope returns the scope of a bearer token, or "" if invalid.

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -125,4 +126,42 @@ func (c *client) upload(dir string) (string, error) {
 		return "", &exitErr{exitError, msg}
 	}
 	return r.Upload, nil
+}
+
+// listUpload prints the files --dir would upload, without uploading.
+func listUpload(root string) error {
+	var files []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		if d.IsDir() {
+			if rel != "." && skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type().IsRegular() {
+			files = append(files, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		fmt.Println(f)
+	}
+	fmt.Fprintf(os.Stderr, "%d files would be uploaded (skipped: %s)\n", len(files), skipList())
+	return nil
+}
+
+func skipList() string {
+	var out []string
+	for k := range skipDirs {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return strings.Join(out, " ")
 }
