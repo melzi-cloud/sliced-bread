@@ -10,7 +10,7 @@ The first goal is a working demo of three flows:
 
 | | Milestone | Done when |
 |---|---|---|
-| M0 | One tenant created by a script | 3 Debian VMs, k3s HA, Hetzner CSI, Traefik, cert-manager with a wildcard cert, Hetzner LB, firewall allowing only 80/443 |
+| M0 | One tenant created by a script | 3 Debian VMs, k3s HA, Hetzner CSI, Traefik, cert-manager with a wildcard cert, Hetzner LB, firewall allowing only 80/443. **Done 2026-11-06** (`make e2e-hetzner`) |
 | M1 | Minimal control plane | GitHub login, org = tenant, API, desired state, tenant agent pulling and applying |
 | M2 | Deploys | Container image and GitHub repo (Railpack) deploy to `<app>.<tenant>.slicedbread.cloud` with TLS |
 | M3 | Login wall | Forward-auth, cookie stripping, access modes, public paths |
