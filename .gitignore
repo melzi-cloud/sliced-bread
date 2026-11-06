@@ -8,3 +8,5 @@ kubeconfig*
 node_modules/
 dist/
 test/artifacts/
+.sb/
+bin/
