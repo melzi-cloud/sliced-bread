@@ -52,6 +52,7 @@ The control plane never connects into a tenant. Each tenant runs an agent that c
 - `slicedbread.cloud` will be submitted to the Public Suffix List, so a tenant cannot set cookies for another tenant. Check whether Let's Encrypt then applies rate limits per tenant subdomain.
 - DNS on Cloudflare. One wildcard certificate per tenant (`*.<tenant>.slicedbread.cloud`) issued by cert-manager with DNS-01.
 - Custom domains later via a delegated subdomain such as `*.tools.example.com`.
+- **Development and tests** run under `test.slicedbread.dev`: `<app>.<run-id>.test.slicedbread.dev`, with Let's Encrypt staging certificates. Cloudflare API tokens are scoped per zone, so a test token can edit any record in `slicedbread.dev`. Before launch, either move tests to a separate domain or keep the console off `slicedbread.dev`.
 
 ## Login wall (D-009)
 

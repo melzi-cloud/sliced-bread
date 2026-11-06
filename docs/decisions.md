@@ -25,6 +25,8 @@ Hetzner documents triple replication for volumes, which removes the need for our
 ## D-007 Domains: slicedbread.dev for console, slicedbread.cloud for apps (2026-11-06)
 Separate registrable domain for user content. slicedbread.cloud goes on the Public Suffix List.
 
+Amended 2026-11-06: development and tests use `test.slicedbread.dev` until launch. Revisit before launch, because a zone-scoped test token can edit every record in `slicedbread.dev`.
+
 ## D-008 DNS on Cloudflare, wildcard certs per tenant via DNS-01 (2026-11-06)
 
 ## D-009 Own login wall, GitHub login first, per-app access modes (2026-11-06)
