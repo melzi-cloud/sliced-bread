@@ -2,7 +2,7 @@ SECRETS := hack/secrets-env
 SB      := go run ./cmd/sb
 RUN     ?=
 
-.PHONY: help test build e2e-hetzner reaper tenant-up tenant-down tenant-list tenant-ssh check
+.PHONY: help test build e2e-hetzner reaper tenant-up tenant-down tenant-list tenant-ssh check prototype-up control-push
 
 help:
 	@echo "make test           unit tests and vet (L0)"
@@ -13,6 +13,8 @@ help:
 	@echo "make tenant-list    list labelled resources by run"
 	@echo "make tenant-ssh RUN=<run-id>   print an ssh command for node 1"
 	@echo "make check          test + secret scan of tracked files"
+	@echo "make prototype-up   tenant with the full SlicedBread platform and trusted certificates"
+	@echo "make control-push RUN=<run-id>   rebuild sb-control and roll it out"
 
 test:
 	go vet ./...
@@ -45,3 +47,10 @@ tenant-ssh:
 
 check: test
 	hack/scan-secrets
+
+prototype-up: build
+	$(SECRETS) $(SB) dev prototype up
+
+control-push:
+	@test -n "$(RUN)" || (echo "usage: make control-push RUN=<run-id>" && exit 2)
+	$(SECRETS) $(SB) dev control push $(RUN)

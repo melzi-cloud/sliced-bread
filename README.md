@@ -2,7 +2,21 @@
 
 Run off-the-shelf software and AI-built apps on infrastructure that keeps itself private, patched and recoverable.
 
-> Status: pre-alpha. Design phase. Nothing here is ready to run yet.
+> Status: prototype. Runs on Hetzner development tenants. Not production ready.
+
+## Try the prototype
+
+```sh
+make prototype-up                       # prints the run id, dashboard URL and CLI config paths
+export SB_CONFIG=.sb/runs/<run-id>/cli-agent.json
+bin/sb deploy vault --template vaultwarden && bin/sb wait vault
+bin/sb deploy myapp --dir ~/code/my-lovable-export && bin/sb wait myapp
+bin/sb deploy analytics --template umami && bin/sb wait analytics
+bin/sb action analytics create_website --input name=MyApp --input domain=myapp.<tenant-domain>
+make tenant-down RUN=<run-id>
+```
+
+Agents should read [skill/SKILL.md](skill/SKILL.md).
 
 ## What it does
 
@@ -19,6 +33,7 @@ Run off-the-shelf software and AI-built apps on infrastructure that keeps itself
 - [Technical decisions](docs/decisions.md)
 - [Roadmap and acceptance tests](docs/roadmap.md)
 - [Development and testing](docs/development.md)
+- [Agent skill file](skill/SKILL.md)
 
 ## License
 

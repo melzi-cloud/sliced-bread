@@ -121,3 +121,18 @@ Open: use Flux pulling a per-tenant OCI artifact, or a small custom agent. Flux 
 - Object storage provider for backups: Hetzner Object Storage in a second location, or Cloudflare R2 for provider separation.
 - Flux or custom tenant agent (see above).
 - Minimum observability for the MVP: what alerts exist on day one.
+
+## Prototype implementation (2026-11-06)
+
+What is built today, and where it differs from the target design above:
+
+| Area | Prototype |
+|---|---|
+| Control plane | `sb-control` inside each tenant (D-014). No central control plane yet. |
+| Login wall | Email and password accounts, forward-auth with cookie stripping (D-015). GitHub login next. |
+| Agent safety | Agent and admin tokens, approvals for widening exposure and deletes (D-016). |
+| Sources | Templates (Vaultwarden, Umami), container images, public git repos, uploaded directories (D-017, D-018). |
+| Databases | CloudNativePG, one instance per app. No backups yet. |
+| Backups and restore tests | Not built (M6). Do not put real data on a prototype tenant. |
+| Node replacement, patching | Not built. Debian unattended upgrades are not enabled yet. |
+| Known gaps | Apps run as root in containers with all capabilities dropped (Pod Security `baseline`, warn on `restricted`). The in-cluster registry has no authentication. Pods can read Hetzner metadata (user data). |
