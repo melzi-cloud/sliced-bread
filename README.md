@@ -18,6 +18,7 @@ Run off-the-shelf software and AI-built apps on infrastructure that keeps itself
 - [App spec](docs/app-spec.md)
 - [Technical decisions](docs/decisions.md)
 - [Roadmap and acceptance tests](docs/roadmap.md)
+- [Development and testing](docs/development.md)
 
 ## License
 
