@@ -422,6 +422,7 @@ func (s *Server) tick(ctx context.Context) {
 	}
 	if fresh, err := s.listApps(ctx); err == nil {
 		s.evaluateAlerts(ctx, fresh, bc)
+		s.maybeCheckImages(ctx, fresh)
 	}
 }
 
@@ -450,6 +451,7 @@ type AppStatus struct {
 	Database     string            `json:"database,omitempty"`
 	Notes        string            `json:"notes,omitempty"`
 	Backups      string            `json:"backups,omitempty"`
+	Update       string            `json:"update,omitempty"`
 	BackupShort  string            `json:"-"`
 }
 
@@ -477,6 +479,9 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 		st.Backups = backupSummary(a)
 	}
 	st.BackupShort = backupShort(a, time.Now())
+	if u, ok := s.imageUpdates(ctx)[a.Name]; ok && u.Latest != "" {
+		st.Update = u.Image + ":" + u.Latest + " is available (running " + u.Current + "); not applied automatically"
+	}
 	switch {
 	case a.Template != "":
 		st.Source = "template " + a.Template

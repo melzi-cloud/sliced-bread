@@ -67,6 +67,7 @@ type Guard struct {
 	hcToken string
 	lastMsg string
 	dnsAt   time.Time
+	inMaint bool
 }
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339) }
@@ -227,34 +228,40 @@ func (g *Guard) step(ctx context.Context) error {
 		g.say("sb-guard: no install info (%v); node repair is off", err)
 		return nil
 	}
-	if info.Size != 3 {
-		g.say("sb-guard: %d-node install; servers are not replaced automatically", info.Size)
-		return nil
-	}
 	list, err := g.Kube.List(ctx, "v1", "Node", "", "")
 	if err != nil {
 		return err
 	}
 	nodes := nodeViews(list)
+	if info.Size != 3 {
+		g.say("sb-guard: %d-node install; servers are not replaced automatically, OS maintenance runs nightly", info.Size)
+		g.finishLeftovers(ctx, info, list)
+		if len(nodes) == 1 && nodes[0].Ready {
+			g.maybeMaintain(ctx, info, nodes)
+		}
+		return nil
+	}
 	if time.Since(g.dnsAt) > time.Minute {
 		if err := g.ensureCoreDNS(ctx); err != nil {
 			g.say("sb-guard: coredns: %v", err)
 		}
 		g.dnsAt = time.Now()
 	}
+	g.finishLeftovers(ctx, info, list)
 	st := g.load(ctx)
 	now := time.Now()
 	if st.Active != nil {
 		return g.continueRepair(ctx, info, st, nodes)
 	}
 	var bad []nodeView
-	for _, n := range nodes {
-		if !n.Ready {
-			bad = append(bad, n)
+	for i, n := range nodes {
+		if !n.Ready && !underMaintenance(list[indexOf(list, n.Name)], now) {
+			bad = append(bad, nodes[i])
 		}
 	}
 	if len(bad) == 0 {
 		g.say("sb-guard: %d nodes Ready", len(nodes))
+		g.maybeMaintain(ctx, info, nodes)
 		return nil
 	}
 	if len(bad) > 1 || len(nodes) < 3 {
@@ -651,4 +658,13 @@ func (g *Guard) ensureCoreDNS(ctx context.Context) error {
 			}}},
 		}},
 	}})
+}
+
+func indexOf(list []kube.Obj, name string) int {
+	for i, o := range list {
+		if kube.Str(o, "metadata", "name") == name {
+			return i
+		}
+	}
+	return 0
 }

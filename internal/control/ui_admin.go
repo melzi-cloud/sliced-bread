@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
+	"github.com/melzi-cloud/sliced-bread/internal/guard"
 	"github.com/melzi-cloud/sliced-bread/internal/kube"
 )
 
@@ -100,10 +101,12 @@ type settingsView struct {
 	Tokens            []TokenView
 	NewToken          string
 	APIURL            string
+	Maint             *guard.MaintState
 }
 
 func (s *Server) settingsData(ctx context.Context) *settingsView {
-	v := &settingsView{OwnerEmail: s.auth.OwnerEmail(), Tokens: s.auth.Tokens(time.Now()), APIURL: "https://" + s.hosts().API()}
+	v := &settingsView{OwnerEmail: s.auth.OwnerEmail(), Tokens: s.auth.Tokens(time.Now()), APIURL: "https://" + s.hosts().API(),
+		Maint: guard.LoadMaint(ctx, s.kube)}
 	if c, _ := s.backupConfig(ctx); c != nil {
 		v.BackupsConfigured, v.BackupTarget, v.BackupHour = true, strings.TrimPrefix(c.Repository(), "s3:"), c.Hour
 	}
@@ -245,6 +248,14 @@ func (s *Server) adminRoutes(m *http.ServeMux) {
 			return
 		}
 		s.renderSettings(w, r, email, nil, "Webhook saved.", "")
+	}))
+	m.HandleFunc("POST /settings/maintenance", s.adminPost(func(w http.ResponseWriter, r *http.Request, email string) {
+		if err := guard.RequestMaintenance(r.Context(), s.kube); err != nil {
+			s.renderSettings(w, r, email, nil, "", err.Error())
+			return
+		}
+		s.logf("OS maintenance requested by %s", email)
+		s.renderSettings(w, r, email, nil, "OS maintenance requested: the guard starts within a minute and checks each server, rebooting those that need it one at a time.", "")
 	}))
 	m.HandleFunc("POST /settings/fallback", s.adminPost(func(w http.ResponseWriter, r *http.Request, email string) {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)

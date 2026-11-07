@@ -1006,6 +1006,9 @@ func printStatus(st map[string]any) {
 	if v, _ := st["storage"].(string); v != "" {
 		fmt.Println("storage:", v)
 	}
+	if u, _ := st["update"].(string); u != "" {
+		fmt.Println("update:", u)
+	}
 	if n, _ := st["notes"].(string); n != "" {
 		fmt.Println("notes:", n)
 	}

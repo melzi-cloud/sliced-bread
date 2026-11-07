@@ -23,6 +23,16 @@ spec:
   valuesContent: |-
     deployment:
       replicas: 2
+      # Stay in the endpoints a moment after being told to stop, so a drained or
+      # restarted Traefik never refuses a request (patch day, rolling restarts).
+      lifecycle:
+        preStop:
+          exec: {command: ["sh", "-c", "sleep 10"]}
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - topologyKey: kubernetes.io/hostname
+            labelSelector: {matchLabels: {app.kubernetes.io/name: traefik}}
     service:
       type: NodePort
     ports:

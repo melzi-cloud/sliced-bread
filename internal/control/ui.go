@@ -87,6 +87,11 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 <label>Webhook URL (empty to remove)<input name="url"></label>
 <label>Format <select name="format"><option>json</option><option>slack</option><option>discord</option><option>ntfy</option></select></label>
 <button type="submit">Save webhook</button><button name="action" value="test">Send test message</button></form>{{end}}
+<h2>OS updates</h2>
+<p class="muted">Security updates install automatically on every server. Servers that need a reboot are restarted one at a time in the nightly window (an hour after backups); on 3 servers, apps without a volume keep serving, apps with a volume pause for about a minute while it moves.</p>
+{{if .Maint}}{{with .Maint}}<p>Last run: {{if .LastRun}}{{.LastRun}}{{else}}never{{end}}{{if .Running}} (running now){{end}}</p>
+<table>{{range $n, $m := .Nodes}}<tr><td>{{$n}}</td><td class="muted">checked {{$m.CheckedAt}}{{if $m.Kernel}}, kernel {{$m.Kernel}}{{end}}{{if $m.LastRebootAt}}, last reboot {{$m.LastRebootAt}} (away {{$m.LastRebootFor}}){{end}}{{if $m.RebootNeeded}}, <b>reboot pending</b>{{end}}{{if $m.Error}}, <span class="err">{{$m.Error}}</span>{{end}}</td></tr>{{end}}</table>{{end}}{{end}}
+{{if $.IsAdmin}}<form method="post" action="/settings/maintenance"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Run OS maintenance now</button></form>{{end}}
 <h2>Certificates</h2>
 <p>{{.Fallback}}</p>
 {{if $.IsAdmin}}<form method="post" action="/settings/fallback"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Set up ZeroSSL fallback with my email</button></form>{{end}}
@@ -136,7 +141,7 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 {{else}}<p class="ok">No alerts.</p>{{end}}
 <h2>Apps</h2>
 {{if not .Apps}}<p>No apps yet. Ask your agent to deploy one, or run <code>sb deploy</code>.</p>{{end}}
-<table>{{if .Apps}}<tr><th>App</th><th>State</th><th>Access</th><th>Backups</th><th></th><th>Source</th></tr>{{end}}{{range .Apps}}<tr><td><a href="{{.URL}}">{{.Name}}</a></td><td>{{.State}}</td><td>{{.Access}}</td><td>{{.BackupShort}}</td><td><a href="/apps/{{.Name}}">details</a></td><td class="muted">{{.Source}}</td></tr>{{end}}</table>
+<table>{{if .Apps}}<tr><th>App</th><th>State</th><th>Access</th><th>Backups</th><th></th><th>Source</th></tr>{{end}}{{range .Apps}}<tr><td><a href="{{.URL}}">{{.Name}}</a></td><td>{{.State}}</td><td>{{.Access}}</td><td>{{.BackupShort}}{{if .Update}}<br><span class="muted">update: {{.Update}}</span>{{end}}</td><td><a href="/apps/{{.Name}}">details</a></td><td class="muted">{{.Source}}</td></tr>{{end}}</table>
 {{if .Pending}}<p><a href="/approvals">{{.Pending}} approval(s) waiting</a></p>{{end}}
 {{end}}{{end}}
 </body></html>`))

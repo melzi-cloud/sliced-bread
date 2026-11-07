@@ -208,6 +208,16 @@ func registryGCJob(id, node, keep, uploads string) kube.Obj {
 
 // maybeRegistryGC starts a garbage collection once a day when no build is running.
 func (s *Server) maybeRegistryGC(ctx context.Context, list []*apps.App) {
+	if s.registryGCAt.IsZero() {
+		// After a restart or leader change, continue from the newest GC job.
+		if jobs, err := s.kube.List(ctx, "batch/v1", "Job", registryNamespace, "slicedbread.dev/registry-gc"); err == nil {
+			for _, j := range jobs {
+				if t, err := time.Parse(time.RFC3339, kube.Str(j, "metadata", "creationTimestamp")); err == nil && t.After(s.registryGCAt) {
+					s.registryGCAt = t
+				}
+			}
+		}
+	}
 	if time.Since(s.registryGCAt) < registryGCEvery {
 		return
 	}

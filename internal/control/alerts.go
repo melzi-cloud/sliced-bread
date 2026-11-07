@@ -167,6 +167,15 @@ func (s *Server) alertConditions(ctx context.Context, list []*apps.App, bc *Back
 			}
 		}
 	}
+	if m := guard.LoadMaint(ctx, s.kube); m != nil {
+		last, _ := time.Parse(time.RFC3339, m.LastRun)
+		for name, nm := range m.Nodes {
+			if checked, _ := time.Parse(time.RFC3339, nm.CheckedAt); nm.Error != "" && !checked.Before(last) {
+				add(condition{Alert{ID: "maintenance/" + name, Severity: "warning",
+					Title: "OS maintenance on server " + name + " failed", Detail: nm.Error, Hint: "dashboard Settings: Run OS maintenance now, to retry"}, 0})
+			}
+		}
+	}
 	if certs, err := s.kube.List(ctx, "cert-manager.io/v1", "Certificate", "", ""); err == nil {
 		for _, c := range certs {
 			name := kube.Str(c, "metadata", "namespace") + "/" + kube.Str(c, "metadata", "name")

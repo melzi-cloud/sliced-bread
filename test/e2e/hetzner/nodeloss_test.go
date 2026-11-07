@@ -62,6 +62,24 @@ func TestNodeLoss(t *testing.T) {
 	}
 	runID := m[1]
 	defer func() {
+		if t.Failed() {
+			if st, err := tenant.LoadState(p.StateRoot, runID); err == nil {
+				dir := filepath.Join(root, "test", "artifacts", runID)
+				actx, acancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				p.CollectArtifacts(actx, st, dir)
+				for name, args := range map[string]string{
+					"sb-control.log": "-n sb-system logs -l app=sb-control --tail 2000 --prefix",
+					"sb-guard.log":   "-n sb-system logs deploy/sb-guard --tail 2000",
+					"apps.txt":       "get apps.slicedbread.dev -o yaml",
+				} {
+					if out, err := st.Kubectl(actx, args, nil); err == nil {
+						os.WriteFile(filepath.Join(dir, name), out, 0o600)
+					}
+				}
+				acancel()
+				t.Logf("artifacts in test/artifacts/%s", runID)
+			}
+		}
 		if os.Getenv("SB_KEEP") == "1" {
 			t.Logf("keeping %s (make tenant-down RUN=%s)", runID, runID)
 			return

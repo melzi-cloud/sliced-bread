@@ -72,6 +72,7 @@ type Server struct {
 	alertsCache       []Alert
 	fallback          fallbackState
 	isLeader          bool
+	imageCheckAt      time.Time
 	sharedGCAt        time.Time
 }
 

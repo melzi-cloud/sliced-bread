@@ -188,6 +188,8 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - {name: SB_MODE, value: guard}
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}
