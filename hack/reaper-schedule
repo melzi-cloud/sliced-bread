@@ -55,7 +55,7 @@ xml() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<<"$1"; }
 install_agent() {
   [ -f "$ROOT/dev.env" ] || die "$ROOT/dev.env is missing"
   mkdir -p "$DEST/bin" "$DEST/hack" "$(dirname "$PLIST")" "$(dirname "$LOG")"
-  echo "building sb into $DEST/bin"
+  echo "building sb-dev into $DEST/bin"
   (cd "$ROOT" && go build -trimpath -o "$DEST/bin/sb-dev.new" ./hack/sb-dev)
   mv -f "$DEST/bin/sb-dev.new" "$DEST/bin/sb-dev"; rm -f "$DEST/bin/sb"
   install -m 755 "$ROOT/hack/secrets-env" "$ROOT/hack/reaper-agent" "$DEST/hack/"

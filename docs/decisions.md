@@ -116,3 +116,7 @@ Measured on a live install: after a power-off, Kubernetes marks the node unreach
 **Why the official Node image for actions:** it has `fetch` and SQLite built in, so the Umami and Vaultwarden actions need no third-party or self-published image. A small published runtime image remains optional.
 
 **Found while building:** several apps taking their first backup at the same time each ran `restic init` on the same empty repository and damaged it. sb-control now initialises the repository once, before any backup job starts.
+
+## D-033 Restore tests open SQLite files (2026-11-07)
+
+**Decision:** a template's `backup.sqlite` lists SQLite files and tables. After every restore test, a step without backup credentials copies each file of the restored snapshot (with its WAL or journal) and runs `PRAGMA integrity_check`; a file that is missing, empty, damaged or lacks a declared table fails the test. Row counts are reported, never judged: a fresh install has empty tables, and its first backup must pass. Vaultwarden declares `data/db.sqlite3` with `users` and `ciphers`. The check uses the official Node image (SQLite built in), not a third-party sqlite3 image, because it reads decrypted backup data.
