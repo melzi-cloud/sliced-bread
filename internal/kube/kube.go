@@ -137,25 +137,27 @@ type resource struct {
 }
 
 var resources = map[string]resource{
-	"v1/Namespace":                       {"", "v1", "namespaces", false},
-	"v1/Secret":                          {"", "v1", "secrets", true},
-	"v1/ConfigMap":                       {"", "v1", "configmaps", true},
-	"v1/Service":                         {"", "v1", "services", true},
-	"v1/PersistentVolumeClaim":           {"", "v1", "persistentvolumeclaims", true},
-	"v1/Pod":                             {"", "v1", "pods", true},
-	"v1/Node":                            {"", "v1", "nodes", false},
-	"v1/Event":                           {"", "v1", "events", true},
-	"apps/v1/Deployment":                 {"apps", "v1", "deployments", true},
-	"apps/v1/ReplicaSet":                 {"apps", "v1", "replicasets", true},
-	"batch/v1/Job":                       {"batch", "v1", "jobs", true},
-	"networking.k8s.io/v1/Ingress":       {"networking.k8s.io", "v1", "ingresses", true},
-	"networking.k8s.io/v1/NetworkPolicy": {"networking.k8s.io", "v1", "networkpolicies", true},
-	"traefik.io/v1alpha1/Middleware":     {"traefik.io", "v1alpha1", "middlewares", true},
-	"postgresql.cnpg.io/v1/Cluster":      {"postgresql.cnpg.io", "v1", "clusters", true},
-	"cert-manager.io/v1/Certificate":     {"cert-manager.io", "v1", "certificates", true},
-	"cert-manager.io/v1/ClusterIssuer":   {"cert-manager.io", "v1", "clusterissuers", false},
-	"slicedbread.dev/v1alpha1/App":       {"slicedbread.dev", "v1alpha1", "apps", false},
-	"slicedbread.dev/v1alpha1/Approval":  {"slicedbread.dev", "v1alpha1", "approvals", false},
+	"v1/Namespace":                                     {"", "v1", "namespaces", false},
+	"v1/Secret":                                        {"", "v1", "secrets", true},
+	"v1/ConfigMap":                                     {"", "v1", "configmaps", true},
+	"v1/Service":                                       {"", "v1", "services", true},
+	"v1/PersistentVolumeClaim":                         {"", "v1", "persistentvolumeclaims", true},
+	"v1/Pod":                                           {"", "v1", "pods", true},
+	"v1/Node":                                          {"", "v1", "nodes", false},
+	"v1/Event":                                         {"", "v1", "events", true},
+	"apps/v1/Deployment":                               {"apps", "v1", "deployments", true},
+	"apps/v1/ReplicaSet":                               {"apps", "v1", "replicasets", true},
+	"batch/v1/Job":                                     {"batch", "v1", "jobs", true},
+	"networking.k8s.io/v1/Ingress":                     {"networking.k8s.io", "v1", "ingresses", true},
+	"networking.k8s.io/v1/NetworkPolicy":               {"networking.k8s.io", "v1", "networkpolicies", true},
+	"traefik.io/v1alpha1/Middleware":                   {"traefik.io", "v1alpha1", "middlewares", true},
+	"postgresql.cnpg.io/v1/Cluster":                    {"postgresql.cnpg.io", "v1", "clusters", true},
+	"cert-manager.io/v1/Certificate":                   {"cert-manager.io", "v1", "certificates", true},
+	"cert-manager.io/v1/ClusterIssuer":                 {"cert-manager.io", "v1", "clusterissuers", false},
+	"coordination.k8s.io/v1/Lease":                     {"coordination.k8s.io", "v1", "leases", true},
+	"policy/v1/PodDisruptionBudget":                    {"policy", "v1", "poddisruptionbudgets", true},
+	"slicedbread.dev/v1alpha1/App":                     {"slicedbread.dev", "v1alpha1", "apps", false},
+	"slicedbread.dev/v1alpha1/Approval":                {"slicedbread.dev", "v1alpha1", "approvals", false},
 	"apiextensions.k8s.io/v1/CustomResourceDefinition": {"apiextensions.k8s.io", "v1", "customresourcedefinitions", false},
 }
 
@@ -205,6 +207,37 @@ func (c *Client) Apply(ctx context.Context, o Obj) error {
 	}
 	q := url.Values{"fieldManager": {c.Manager}, "force": {"true"}}
 	_, err = c.do(ctx, http.MethodPatch, p+"?"+q.Encode(), "application/apply-patch+yaml", b)
+	return err
+}
+
+// Create creates an object; it fails with a 409 (IsConflict) if the name is taken, which
+// makes it usable as an atomic "first one wins" check across replicas.
+func (c *Client) Create(ctx context.Context, o Obj) error {
+	p, err := objPath(o)
+	if err != nil {
+		return err
+	}
+	p = p[:strings.LastIndex(p, "/")]
+	b, err := json.Marshal(o)
+	if err != nil {
+		return err
+	}
+	_, err = c.do(ctx, http.MethodPost, p, "application/json", b)
+	return err
+}
+
+// Update replaces an object. With metadata.resourceVersion set it fails with a 409 if the
+// object changed since it was read (optimistic concurrency).
+func (c *Client) Update(ctx context.Context, o Obj) error {
+	p, err := objPath(o)
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(o)
+	if err != nil {
+		return err
+	}
+	_, err = c.do(ctx, http.MethodPut, p, "application/json", b)
 	return err
 }
 

@@ -66,13 +66,15 @@ type authState struct {
 
 // Auth holds users, API tokens and the session signing key.
 type Auth struct {
-	mu     sync.RWMutex
-	st     authState
-	key    []byte
-	domain string
-	kube   *kube.Client
-	ns     string
-	used   map[string]int64 // redeemed exchange nonces
+	mu          sync.RWMutex
+	st          authState
+	key         []byte
+	domain      string
+	kube        *kube.Client
+	ns          string
+	used        map[string]int64 // redeemed exchange nonces (tests; replicas use ConfigMaps)
+	rv          string           // resourceVersion of the loaded sb-auth Secret
+	refreshedAt time.Time        // last reload
 }
 
 // MintToken creates and persists a new API token, returning its plaintext once.
@@ -102,23 +104,37 @@ func sha(s string) string {
 // sb-bootstrap secret so the operator can fetch them once.
 func LoadAuth(ctx context.Context, k *kube.Client, ns, domain string) (*Auth, error) {
 	a := &Auth{domain: domain, kube: k, ns: ns}
-	var sec kube.Obj
-	err := k.Get(ctx, "v1", "Secret", ns, authSecret, &sec)
-	if err == nil {
-		raw, _ := base64.StdEncoding.DecodeString(kube.Str(sec, "data", "state.json"))
-		if err := json.Unmarshal(raw, &a.st); err != nil {
+	for attempt := 0; attempt < 3; attempt++ {
+		var sec kube.Obj
+		err := k.Get(ctx, "v1", "Secret", ns, authSecret, &sec)
+		if err == nil {
+			st, rv, err := authFromSecret(sec)
+			if err != nil {
+				return nil, err
+			}
+			a.st, a.rv, a.refreshedAt = st, rv, time.Now()
+			a.key = []byte(a.st.SessionKey)
+			return a, nil
+		}
+		if !kube.IsNotFound(err) {
 			return nil, err
 		}
-	} else if kube.IsNotFound(err) {
 		// First start: no user and no admin token. The owner account is created through a
 		// one-time setup link (see setup.go); the CLI gets an agent token, which cannot
-		// approve its own requests.
+		// approve its own requests. Create, not apply: when two replicas start together,
+		// one wins and the other loads its state.
 		agentTok := "sbt_" + randString(24)
-		a.st = authState{
+		st := authState{
 			SessionKey: randString(32),
 			Tokens:     []token{{Name: "agent (sb init)", Scope: ScopeAgent, SHA256: sha(agentTok), Created: time.Now().Unix()}},
 		}
-		if err := a.save(ctx, k, ns); err != nil {
+		obj, err := authSecretObj(ns, st, "")
+		if err != nil {
+			return nil, err
+		}
+		if err := k.Create(ctx, obj); kube.IsConflict(err) {
+			continue
+		} else if err != nil {
 			return nil, err
 		}
 		boot := kube.Obj{
@@ -130,24 +146,8 @@ func LoadAuth(ctx context.Context, k *kube.Client, ns, domain string) (*Auth, er
 		if err := k.Apply(ctx, boot); err != nil {
 			return nil, err
 		}
-	} else {
-		return nil, err
 	}
-	a.key = []byte(a.st.SessionKey)
-	return a, nil
-}
-
-func (a *Auth) save(ctx context.Context, k *kube.Client, ns string) error {
-	b, err := json.Marshal(a.st)
-	if err != nil {
-		return err
-	}
-	return k.Apply(ctx, kube.Obj{
-		"apiVersion": "v1", "kind": "Secret",
-		"metadata": kube.Obj{"name": authSecret, "namespace": ns},
-		"type":     "Opaque",
-		"data":     kube.Obj{"state.json": base64.StdEncoding.EncodeToString(b)},
-	})
+	return nil, errors.New("could not load or create the auth state")
 }
 
 // Emails lists the team members the login wall admits.
@@ -169,21 +169,34 @@ func (a *Auth) TokenScope(r *http.Request) string {
 		return ""
 	}
 	sum := sha(strings.TrimSpace(tok))
+	for attempt := 0; attempt < 2; attempt++ {
+		if scope, found := a.tokenScope(sum); found {
+			return scope
+		}
+		a.refreshSoon() // minted on the other replica a moment ago?
+	}
+	return ""
+}
+
+func (a *Auth) tokenScope(sum string) (string, bool) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	for _, t := range a.st.Tokens {
 		if subtle.ConstantTimeCompare([]byte(t.SHA256), []byte(sum)) == 1 {
 			if t.Expires > 0 && time.Now().Unix() >= t.Expires {
-				return ""
+				return "", true
 			}
-			return t.Scope
+			return t.Scope, true
 		}
 	}
-	return ""
+	return "", false
 }
 
 // CheckPassword verifies a user's password.
 func (a *Auth) CheckPassword(email, password string) bool {
+	if !a.hasUser(email) {
+		a.refreshSoon()
+	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	for _, u := range a.st.Users {
@@ -270,20 +283,15 @@ func (a *Auth) RedeemExchange(v, host string, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.used == nil {
-		a.used = map[string]int64{}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fresh, err := a.markUsed(ctx, p.Nonce, p.Exp)
+	if err != nil {
+		return "", err
 	}
-	for n, exp := range a.used {
-		if now.Unix() > exp {
-			delete(a.used, n)
-		}
-	}
-	if _, seen := a.used[p.Nonce]; seen {
+	if !fresh {
 		return "", errors.New("token already used")
 	}
-	a.used[p.Nonce] = p.Exp
 	return p.Email, nil
 }
 

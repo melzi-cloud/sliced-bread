@@ -29,6 +29,8 @@ const (
 func registryPolicyObj(nodeSources []string) kube.Obj {
 	from := []any{
 		kube.Obj{"namespaceSelector": kube.Obj{"matchLabels": kube.Obj{"kubernetes.io/metadata.name": "sb-builds"}}},
+		// sb-control keeps uploaded source in the registry (sb-uploads).
+		kube.Obj{"podSelector": kube.Obj{"matchLabels": kube.Obj{"app": "sb-control"}}},
 	}
 	for _, src := range nodeSources {
 		from = append(from, kube.Obj{"ipBlock": kube.Obj{"cidr": src + "/32"}})
@@ -152,7 +154,13 @@ for repo in "$R"/*; do
   [ -d "$repo" ] || continue
   app=$(basename "$repo"); items=""
   [ "$app" = sb-control ] && continue # the control plane image, pulled by servers that join later
-  for entry in $SB_KEEP; do [ "${entry%%=*}" = "$app" ] && items=$(echo "${entry#*=}" | tr , ' '); done
+  if [ "$app" = sb-uploads ]; then # uploaded source: keep what apps use and anything from the last 2 days
+    items="keep $SB_UPLOADS"
+    for t in "$repo"/_manifests/tags/*; do
+      [ -d "$t" ] && [ -z "$(find "$t" -maxdepth 0 -mtime +2)" ] && items="$items $(basename "$t")"
+    done
+  fi
+  [ "$app" = sb-uploads ] || for entry in $SB_KEEP; do [ "${entry%%=*}" = "$app" ] && items=$(echo "${entry#*=}" | tr , ' '); done
   if [ -z "$items" ]; then echo "removing images of $app (app gone or not built from source)"; rm -rf "$repo"; continue; fi
   keepd=""
   for k in $items; do case "$k" in sha256:*) keepd="$keepd $k";; esac; done
@@ -177,7 +185,7 @@ echo "SB_GC done"
 
 // registryGCJob removes images no app uses any more. It runs next to the registry pod
 // (the volume is ReadWriteOnce) and only while no build is pushing.
-func registryGCJob(id, node, keep string) kube.Obj {
+func registryGCJob(id, node, keep, uploads string) kube.Obj {
 	return kube.Obj{
 		"apiVersion": "batch/v1", "kind": "Job",
 		"metadata": kube.Obj{"name": "registry-gc-" + id, "namespace": registryNamespace,
@@ -188,7 +196,7 @@ func registryGCJob(id, node, keep string) kube.Obj {
 				"restartPolicy": "Never", "automountServiceAccountToken": false, "nodeName": node,
 				"containers": []any{kube.Obj{
 					"name": "gc", "image": registryImage, "command": []any{"sh", "-c", registryGCScript},
-					"env":             []any{kube.Obj{"name": "SB_KEEP", "value": keep}},
+					"env":             []any{kube.Obj{"name": "SB_KEEP", "value": keep}, kube.Obj{"name": "SB_UPLOADS", "value": uploads}},
 					"volumeMounts":    []any{kube.Obj{"name": "data", "mountPath": "/var/lib/registry"}},
 					"securityContext": kube.Obj{"allowPrivilegeEscalation": false},
 				}},
@@ -217,7 +225,13 @@ func (s *Server) maybeRegistryGC(ctx context.Context, list []*apps.App) {
 		return
 	}
 	id := randID(6)
-	if err := s.kube.Apply(ctx, registryGCJob(id, node, keepSpec(registryKeep(list)))); err != nil {
+	var uploads []string
+	for _, a := range list {
+		if a.Upload != nil {
+			uploads = append(uploads, a.Upload.ID)
+		}
+	}
+	if err := s.kube.Apply(ctx, registryGCJob(id, node, keepSpec(registryKeep(list)), strings.Join(uploads, " "))); err != nil {
 		s.logf("registry gc: %v", err)
 		return
 	}

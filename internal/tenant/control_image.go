@@ -159,15 +159,21 @@ func (p *Provisioner) DeployControl(ctx context.Context, st *State, repoRoot str
 	if err := p.ImportImage(ctx, st, tb); err != nil {
 		return err
 	}
-	m, err := PlatformManifest(PlatformParams{Domain: st.Domain, ControlImage: ref})
+	replicas := 2
+	if st.Size == 1 {
+		replicas = 1
+	}
+	m, err := PlatformManifest(PlatformParams{Domain: st.Domain, ControlImage: ref, ControlReplicas: replicas})
 	if err != nil {
 		return err
 	}
 	if _, err := st.Kubectl(ctx, "apply -f -", []byte(m)); err != nil {
 		return fmt.Errorf("apply platform: %w", err)
 	}
-	// Remove components older versions installed (the shared privileged BuildKit daemon).
-	if _, err := st.Kubectl(ctx, "-n sb-builds delete deployment/buildkitd service/buildkitd networkpolicy/buildkitd-only-builds --ignore-not-found", nil); err != nil {
+	// Remove components older versions installed: the shared privileged BuildKit daemon,
+	// and sb-control's volume (uploads now live in the registry).
+	if _, err := st.Kubectl(ctx, "-n sb-builds delete deployment/buildkitd service/buildkitd networkpolicy/buildkitd-only-builds --ignore-not-found && "+
+		"k3s kubectl -n sb-system delete pvc sb-control-data --ignore-not-found --wait=false", nil); err != nil {
 		return fmt.Errorf("remove old buildkitd: %w", err)
 	}
 	p.Logf("[%s] waiting for platform components", st.RunID)

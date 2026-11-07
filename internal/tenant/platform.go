@@ -22,8 +22,9 @@ const registriesYAML = `mirrors:
 
 // PlatformParams fill the platform manifest.
 type PlatformParams struct {
-	Domain       string
-	ControlImage string
+	Domain          string
+	ControlImage    string
+	ControlReplicas int
 }
 
 var platformTmpl = template.Must(template.New("platform").Parse(`apiVersion: v1
@@ -85,7 +86,7 @@ kind: ClusterRole
 metadata:
   name: sb-control
 rules:
-  - apiGroups: ["", "apps", "batch", "networking.k8s.io", "traefik.io", "postgresql.cnpg.io", "slicedbread.dev"]
+  - apiGroups: ["", "apps", "batch", "networking.k8s.io", "traefik.io", "postgresql.cnpg.io", "slicedbread.dev", "coordination.k8s.io", "policy"]
     resources: ["*"]
     verbs: ["*"]
   # Certificate status for alerts, and the ZeroSSL fallback issuer it enables after setup.
@@ -107,8 +108,10 @@ metadata:
   name: sb-control
   namespace: sb-system
 spec:
-  replicas: 1
-  strategy: {type: Recreate}
+  # Two replicas on 3-node installs: the login wall in front of every app stays up while a
+  # server reboots or dies. State lives in the cluster and the registry, not on a volume.
+  replicas: {{.ControlReplicas}}
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
   selector:
     matchLabels: {app: sb-control}
   template:
@@ -121,9 +124,17 @@ spec:
         runAsUser: 65532
         fsGroup: 65532
         seccompProfile: {type: RuntimeDefault}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm: {topologyKey: kubernetes.io/hostname, labelSelector: {matchLabels: {app: sb-control}}}
+      tolerations:
+        - {key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30}
+        - {key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30}
       volumes:
         - name: data
-          persistentVolumeClaim: {claimName: sb-control-data}
+          emptyDir: {sizeLimit: 1Gi} # cache of uploaded source; the registry holds the copy
       containers:
         - name: sb-control
           image: {{.ControlImage}}
@@ -184,17 +195,18 @@ spec:
           resources:
             requests: {cpu: 10m, memory: 32Mi}
             limits: {memory: 128Mi}
+{{- if gt .ControlReplicas 1}}
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
+apiVersion: policy/v1
+kind: PodDisruptionBudget
 metadata:
-  name: sb-control-data
+  name: sb-control
   namespace: sb-system
 spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: hcloud-volumes
-  resources:
-    requests: {storage: 10Gi}
+  minAvailable: 1
+  selector:
+    matchLabels: {app: sb-control}
+{{- end}}
 ---
 apiVersion: v1
 kind: Service

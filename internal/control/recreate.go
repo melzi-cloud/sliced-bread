@@ -309,6 +309,11 @@ func (s *Server) handleRestoreSource(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = os.Rename(tmp, s.uploadPath(id))
 	}
+	if err == nil {
+		if err = s.pushUpload(r.Context(), id); err != nil {
+			os.Remove(s.uploadPath(id))
+		}
+	}
 	if err != nil {
 		os.Remove(tmp)
 		s.logf("restore source for %s rejected after %d bytes: %v", app, n, err)

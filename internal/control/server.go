@@ -71,6 +71,8 @@ type Server struct {
 	alertsAt          time.Time
 	alertsCache       []Alert
 	fallback          fallbackState
+	isLeader          bool
+	sharedGCAt        time.Time
 }
 
 // New creates a server and loads or bootstraps auth state.
@@ -149,7 +151,16 @@ func (s *Server) loop(ctx context.Context) {
 	t := time.NewTicker(8 * time.Second)
 	defer t.Stop()
 	for {
-		s.tick(ctx)
+		// Every replica keeps its copy of the auth state current; only the lease holder
+		// runs background work (builds, backups, alerts, registry upkeep).
+		s.auth.refresh(ctx)
+		if s.leader(ctx) {
+			s.tick(ctx)
+			if time.Since(s.sharedGCAt) > 5*time.Minute {
+				s.gcShared(ctx)
+				s.sharedGCAt = time.Now()
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return

@@ -50,10 +50,8 @@ func userCode() string {
 }
 
 func (s *Server) apiDeviceStart(w http.ResponseWriter, r *http.Request) {
-	s.devices.mu.Lock()
-	defer s.devices.mu.Unlock()
-	s.devices.gc()
-	if len(s.devices.grants) >= 50 {
+	ctx := r.Context()
+	if s.countGrants(ctx) >= 50 {
 		fail(w, 429, "too many pending logins", "try again in a few minutes")
 		return
 	}
@@ -62,7 +60,10 @@ func (s *Server) apiDeviceStart(w http.ResponseWriter, r *http.Request) {
 		label = label[:60]
 	}
 	g := &deviceGrant{Code: userCode(), Poll: randString(24), Expires: time.Now().Add(10 * time.Minute), Requester: label}
-	s.devices.grants[g.Poll] = g
+	if err := s.saveGrant(ctx, g); err != nil {
+		fail(w, 500, err.Error(), "")
+		return
+	}
 	writeJSON(w, 201, map[string]any{
 		"code": g.Code, "poll": g.Poll, "expiresIn": 600,
 		"verifyUrl": "https://" + s.hosts().Auth() + "/device?code=" + g.Code,
@@ -70,46 +71,38 @@ func (s *Server) apiDeviceStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiDevicePoll(w http.ResponseWriter, r *http.Request) {
-	s.devices.mu.Lock()
-	defer s.devices.mu.Unlock()
-	g := s.devices.grants[r.PathValue("poll")]
+	ctx := r.Context()
+	g := s.grantByPoll(ctx, r.PathValue("poll"))
 	switch {
 	case g == nil || time.Now().After(g.Expires):
 		fail(w, 404, "login request expired or unknown", "run sb login again")
 	case g.Denied:
-		delete(s.devices.grants, g.Poll)
+		s.deleteGrant(ctx, g.Poll)
 		fail(w, 403, "login was denied in the browser", "")
 	case g.Token == "":
 		writeJSON(w, 202, map[string]any{"state": "pending"})
 	default:
-		tok := g.Token
-		delete(s.devices.grants, g.Poll)
-		writeJSON(w, 200, map[string]any{"state": "approved", "token": tok, "scope": ScopeAgent, "domain": s.cfg.Domain})
+		s.deleteGrant(ctx, g.Poll)
+		writeJSON(w, 200, map[string]any{"state": "approved", "token": g.Token, "scope": ScopeAgent, "domain": s.cfg.Domain})
 	}
 }
 
 // approveDevice mints an agent token for a device grant after a human approved it in the browser.
 func (s *Server) approveDevice(ctx context.Context, code, approver string, allow bool) error {
-	s.devices.mu.Lock()
-	g := s.devices.byCode(code)
-	s.devices.mu.Unlock()
+	g := s.grantByCode(ctx, code)
 	if g == nil {
 		return errExpired
 	}
 	if !allow {
-		s.devices.mu.Lock()
 		g.Denied = true
-		s.devices.mu.Unlock()
-		return nil
+		return s.saveGrant(ctx, g)
 	}
 	tok, err := s.auth.MintToken(ctx, "cli "+code+" approved by "+approver, ScopeAgent, approver)
 	if err != nil {
 		return err
 	}
-	s.devices.mu.Lock()
 	g.Token = tok
-	s.devices.mu.Unlock()
-	return nil
+	return s.saveGrant(ctx, g)
 }
 
 type expiredErr struct{}

@@ -56,25 +56,15 @@ func roleOf(u user) string {
 
 func normEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
 
-// mutate applies a change to the auth state and persists it.
-func (a *Auth) mutate(ctx context.Context, f func(st *authState) error) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	before, _ := json.Marshal(a.st)
-	if err := f(&a.st); err != nil {
-		return err
+func (a *Auth) hasUser(email string) bool {
+	if a.userKnown(email) {
+		return true
 	}
-	if a.kube == nil {
-		return nil
-	}
-	if err := a.save(ctx, a.kube, a.ns); err != nil {
-		json.Unmarshal(before, &a.st) // keep memory and storage in step
-		return err
-	}
-	return nil
+	a.refreshSoon() // created on the other replica a moment ago?
+	return a.userKnown(email)
 }
 
-func (a *Auth) hasUser(email string) bool {
+func (a *Auth) userKnown(email string) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	for _, u := range a.st.Users {

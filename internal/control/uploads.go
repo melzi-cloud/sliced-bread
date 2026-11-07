@@ -3,6 +3,7 @@ package control
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -43,7 +44,7 @@ func (s *Server) uploadInfo(id string) (*apps.Upload, bool) {
 }
 
 func (s *Server) uploadSize(id string) (int64, bool) {
-	if !strings.HasPrefix(id, "u") || len(id) != 11 || strings.ContainsAny(id, "/.") {
+	if !s.ensureLocal(context.Background(), id) {
 		return 0, false
 	}
 	fi, err := os.Stat(s.uploadPath(id))
@@ -136,6 +137,11 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := os.Rename(tmp, s.uploadPath(id)); err != nil {
+		fail(w, 500, err.Error(), "")
+		return
+	}
+	if err := s.pushUpload(r.Context(), id); err != nil {
+		os.Remove(s.uploadPath(id))
 		fail(w, 500, err.Error(), "")
 		return
 	}
