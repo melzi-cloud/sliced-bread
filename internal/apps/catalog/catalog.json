@@ -1,8 +1,8 @@
 {
  "format": 1,
- "serial": 1794088538,
- "built": "2026-11-07T21:55:38Z",
- "source": "melzi-cloud/sliced-bread@d7ee91c (initial snapshot)",
+ "serial": 1794088983,
+ "built": "2026-11-07T22:03:03Z",
+ "source": "melzi-cloud/bakery@31441aa",
  "templates": [
   {
    "name": "umami",
