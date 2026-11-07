@@ -455,7 +455,8 @@ type AppStatus struct {
 	Actions      []actionView      `json:"actions,omitempty"`
 	Setup        []SetupStatus     `json:"setup,omitempty"`
 	Components   []string          `json:"components,omitempty"`
-	Secrets      []string          `json:"secrets,omitempty"` // names only; values never leave the cluster
+	Secrets      []string          `json:"secrets,omitempty"`        // names only; values never leave the cluster
+	Missing      []string          `json:"missingSecrets,omitempty"` // requested secrets without a value yet
 	WallPaths    []string          `json:"wallPaths,omitempty"`
 	Database     string            `json:"database,omitempty"`
 	Notes        string            `json:"notes,omitempty"`
@@ -508,7 +509,7 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 		st.Source = "image " + a.Image
 	}
 	if t := a.TemplateDef; t != nil {
-		st.Actions, st.Notes, st.Setup, st.WallPaths = actionViews(t), t.Notes, s.setupStatus(a), a.WallPaths
+		st.Actions, st.Notes, st.WallPaths = actionViews(t), t.Notes, a.WallPaths
 		st.Source = "template " + t.Name + " " + t.Version
 		if !t.Trusted {
 			st.Source += " (from a local directory)"
@@ -520,8 +521,15 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 	for _, g := range a.Generate {
 		st.Secrets = append(st.Secrets, g.Name+" (generated)")
 	}
+	vals, _ := s.appSecret(ctx, a)
+	st.Setup = s.setupStatus(a, vals)
 	for _, p := range a.Provide {
-		st.Secrets = append(st.Secrets, p.Name+" (entered in the dashboard)")
+		if vals[p.Name] == "" {
+			st.Secrets = append(st.Secrets, p.Name+" (NOT SET: waiting for the user to enter it in the dashboard)")
+			st.Missing = append(st.Missing, p.Name)
+		} else {
+			st.Secrets = append(st.Secrets, p.Name+" (entered in the dashboard)")
+		}
 	}
 	ns := apps.Namespace(a.Name)
 	if a.Database {

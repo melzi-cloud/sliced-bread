@@ -567,12 +567,13 @@ type SetupStatus struct {
 	Done        bool   `json:"done"`
 }
 
-func (s *Server) setupStatus(a *apps.App) []SetupStatus {
-	if a.TemplateDef == nil {
-		return nil
-	}
+func (s *Server) setupStatus(a *apps.App, vals map[string]string) []SetupStatus {
 	var out []SetupStatus
-	for _, step := range a.TemplateDef.Setup {
+	var steps []apps.SetupStep
+	if a.TemplateDef != nil {
+		steps = a.TemplateDef.Setup
+	}
+	for _, step := range steps {
 		st := SetupStatus{Name: step.Name, Description: step.Description, Done: a.Hooks[setupKey(step.Name)+"/done"] == "true"}
 		if step.Link != "" {
 			st.Link = s.enterURL(a.Name, step.Link)
@@ -581,8 +582,12 @@ func (s *Server) setupStatus(a *apps.App) []SetupStatus {
 	}
 	for _, p := range a.Provide {
 		if p.Required {
-			out = append(out, SetupStatus{Name: "secret_" + strings.ToLower(p.Name), Description: "Enter " + p.Name + ": " + p.Description,
-				Link: "https://" + s.hosts().Auth() + "/apps/" + a.Name, Done: a.Hooks["provided/"+p.Name] == "true"})
+			desc := "Enter " + p.Name + " on the app page in the dashboard"
+			if p.Description != "" {
+				desc += " (" + p.Description + ")"
+			}
+			out = append(out, SetupStatus{Name: "secret_" + strings.ToLower(p.Name), Description: desc,
+				Link: "https://" + s.hosts().Auth() + "/apps/" + a.Name, Done: vals[p.Name] != ""})
 		}
 	}
 	return out

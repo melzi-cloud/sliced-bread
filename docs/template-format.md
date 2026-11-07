@@ -28,7 +28,7 @@ bakery/
     README.md            for humans browsing the catalog
 ```
 
-CI builds a signed index of all templates (minisign, task #16): names, versions, image digests and the content hash of every file. sb-control only deploys templates whose files match the index.
+CI will build a signed index of all templates (minisign, task #16): names, versions, image digests and the content hash of every file. Catalog templates will then have to match the index. Until then the catalog is built into sb-control. A template deployed from a directory (`sb deploy <app> --template-dir <path>`) is never in the index: it is untrusted, so access wider than `wall` and its public paths need a human's approval. A `wall` template from a directory deploys without approval.
 
 ## Top-level fields
 
@@ -78,6 +78,16 @@ access:
 `mode` is a default. If the user later narrows access (for example to `wall`), that choice is kept across settings changes and template updates; widening it needs approval as today. Paths match by prefix. `wallPaths` lets an app stay reachable for its own clients while a sensitive part (registration, an admin page) stays team-only.
 
 ## components
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | 2 to 20 lowercase letters, digits or dashes; also the Service name |
+| `image` | yes | `registry/name:tag@sha256:<digest>`. Write the registry out (`docker.io/louislam/uptime-kuma:2@sha256:...`). Get the digest of a multi-arch tag with `crane digest <image>`, `docker buildx imagetools inspect <image>`, or the registry API (`HEAD /v2/<name>/manifests/<tag>` with `Accept: application/vnd.oci.image.index.v1+json`, header `Docker-Content-Digest`) |
+| `port` | first component | the port it listens on; components without one are workers |
+| `health` | no | HTTP readiness path; default is a TCP check on the port |
+| `replicas` | no | default 1; must be 1 with a volume |
+| `resources` | no | requests (`cpu`, `memory`) and `memoryLimit`; defaults 50m, 64Mi and a 1Gi limit |
+| `env`, `volumes`, `files`, `command`, `args`, `runAsUser` | no | as below |
 
 ```yaml
 components:
@@ -156,8 +166,8 @@ An action is a script that runs as a Job next to the app (D-029).
 actions:
   - name: create_website
     description: Register a website and return the tracking snippet for its <head>.
-    image: ghcr.io/melzi-cloud/bakery-runtime:1.0.0@sha256:…   # every action names its image
-    run: actions/create-website.sh
+    image: docker.io/library/node:24.22.2-alpine3.24@sha256:…   # every action names its image
+    run: actions/create-website.mjs
     secrets: [UMAMI_ADMIN_PASSWORD]     # the only secrets the job receives
     input:
       name: {type: string, required: true, description: display name}
@@ -166,16 +176,16 @@ actions:
       website_id: {type: string}
       snippet: {type: string}
   - name: dashboard_login
-    image: ghcr.io/melzi-cloud/bakery-runtime:1.0.0@sha256:…
-    run: actions/dashboard-login.sh
+    image: docker.io/library/node:24.22.2-alpine3.24@sha256:…
+    run: actions/dashboard-login.mjs
     secrets: [UMAMI_ADMIN_PASSWORD]
     output:
       username: {type: string}
       password: {type: string, secret: true}   # only shown to a signed-in human in the dashboard
   - name: set_admin_password
     on: install                          # runs once the app is first healthy; blocks until it succeeds
-    image: ghcr.io/melzi-cloud/bakery-runtime:1.0.0@sha256:…
-    run: actions/set-admin-password.sh
+    image: docker.io/library/node:24.22.2-alpine3.24@sha256:…
+    run: actions/set-admin-password.mjs
     secrets: [UMAMI_ADMIN_PASSWORD]
 ```
 
@@ -290,19 +300,27 @@ notes: |
   Use create_website to get a snippet; verify with test_event and read counts with stats.
 ```
 
-Example action script (`actions/create-website.sh`):
+Example action script (`actions/create-website.mjs`, run with the official `node` image; any image with a shell works for `.sh` scripts):
 
-```sh
-set -eu
-tok=$(curl -fsS "$SB_APP_INTERNAL/api/auth/login" -H 'content-type: application/json' \
-  -d "$(jq -n --arg p "$UMAMI_ADMIN_PASSWORD" '{username:"admin",password:$p}')" | jq -r .token)
-site=$(curl -fsS "$SB_APP_INTERNAL/api/websites" -H "authorization: Bearer $tok" \
-  -H 'content-type: application/json' \
-  -d "$(jq -n --arg n "$SB_INPUT_NAME" --arg d "$SB_INPUT_DOMAIN" '{name:$n,domain:$d}')")
-id=$(echo "$site" | jq -r .id)
-jq -cn --arg id "$id" --arg url "$SB_APP_URL/script.js" \
-  '{website_id: $id, snippet: "<script defer src=\"\($url)\" data-website-id=\"\($id)\"></script>"}'
+```js
+#!/usr/bin/env node
+const base = process.env.SB_APP_INTERNAL;
+const login = await fetch(base + "/api/auth/login", {
+  method: "POST", headers: { "content-type": "application/json" },
+  body: JSON.stringify({ username: "admin", password: process.env.UMAMI_ADMIN_PASSWORD }),
+});
+if (!login.ok) { console.error(`login failed: HTTP ${login.status}`); process.exit(1); }
+const { token } = await login.json();
+const r = await fetch(base + "/api/websites", {
+  method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + token },
+  body: JSON.stringify({ name: process.env.SB_INPUT_NAME, domain: process.env.SB_INPUT_DOMAIN }),
+});
+const site = await r.json();
+const url = process.env.SB_APP_URL + "/script.js";
+console.log(JSON.stringify({ website_id: site.id, snippet: `<script defer src="${url}" data-website-id="${site.id}"></script>` }));
 ```
+
+The real scripts are in `internal/apps/templates/umami/actions/`.
 
 ### Multi-component sketch: Invidious
 

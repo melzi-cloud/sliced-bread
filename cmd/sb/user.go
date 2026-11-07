@@ -751,10 +751,11 @@ func runUser(args []string) error {
 				Env        map[string]string `json:"env"`
 				SecretKeys []string          `json:"secretKeys"`
 				Secrets    []string          `json:"secrets"`
+				Missing    []string          `json:"missingSecrets"`
 			}
 			json.Unmarshal(b, &st)
 			if jsonMode {
-				out, _ := json.Marshal(map[string]any{"env": st.Env, "secretKeys": st.SecretKeys, "secrets": st.Secrets})
+				out, _ := json.Marshal(map[string]any{"env": st.Env, "secretKeys": st.SecretKeys, "secrets": st.Secrets, "missingSecrets": st.Missing})
 				c.print(out)
 				return nil
 			}
@@ -766,8 +767,16 @@ func runUser(args []string) error {
 			for _, k := range keys {
 				fmt.Printf("%s=%s\n", k, st.Env[k])
 			}
+			missing := map[string]bool{}
+			for _, k := range st.Missing {
+				missing[k] = true
+			}
 			for _, k := range st.SecretKeys {
-				fmt.Printf("%s=<secret>\n", k)
+				if missing[k] {
+					fmt.Printf("%s=<not set: the user must enter it in the dashboard>\n", k)
+				} else {
+					fmt.Printf("%s=<secret>\n", k)
+				}
 			}
 			return nil
 		}
@@ -972,7 +981,12 @@ func runUser(args []string) error {
 		if shown == 0 {
 			fmt.Println("(none for", *appFilter+")")
 		}
-		fmt.Println("approve at:", al.ApproveURL)
+		for _, a := range al.Approvals {
+			if a.State == "pending" && (*appFilter == "" || a.App == *appFilter) {
+				fmt.Println("approve at:", al.ApproveURL)
+				break
+			}
+		}
 		return nil
 
 	case "approve", "deny":

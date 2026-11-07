@@ -102,7 +102,7 @@ sb env request <app> STRIPE_KEY --description "Stripe secret key for payments"  
 sb env unset <app> KEY
 ```
 
-**You never see, type or generate secret values.** Do not invent a random string yourself (text from a language model is not random enough) and do not ask the user to paste a secret into the chat. If the app needs a random secret nobody has to read, use `sb env generate`. If it needs a value only the user has (an API key, a password), use `sb env request` and give the user the link it prints; `sb status <app>` shows it as a setup step until the value is entered. `sb deploy` takes the same as flags: `--generate KEY` and `--request KEY:description`.
+**You never see, type or generate secret values.** Do not invent a random string yourself (text from a language model is not random enough) and do not ask the user to paste a secret into the chat. If the app needs a random secret nobody has to read, use `sb env generate`. If it needs a value only the user has (an API key, a password), use `sb env request` and give the user the link it prints. Until the user enters it, `sb env` shows it as `<not set: ...>` and `sb status <app>` lists it as a setup step that is not done. If the user pastes a secret into the chat anyway, do not use it: request it and tell them to rotate the pasted one. `sb deploy` takes the same as flags: `--generate KEY` and `--request KEY:description`.
 
 Values can reference:
 - `${app.url}`: this app's public URL
@@ -110,7 +110,7 @@ Values can reference:
 - `${apps.<other>.internal}`: another app's in-cluster URL (no login wall), e.g. for an API backend. Referencing it is what allows the traffic: apps can only reach apps they reference this way.
 - `${secret.NAME}`: a secret value, must be the whole value
 
-Note: environment variables are runtime only. Frameworks that bake env into the bundle at build time (Vite `VITE_*`) need the value in the source (for example a committed `.env`) before `sb redeploy`.
+Note: environment variables (and secrets) only reach code that runs on the server. A static site (a Vite/React/Lovable export with no backend) never reads them, and a secret such as a Stripe secret key must never go into a browser bundle. Environment variables are runtime only. Frameworks that bake env into the bundle at build time (Vite `VITE_*`) need the value in the source (for example a committed `.env`) before `sb redeploy`.
 
 ## Templates
 
@@ -141,7 +141,7 @@ sb action analytics create_website --input name="My App" --input domain=myapp.<t
 # output includes "snippet": a <script> tag
 ```
 
-Then add the snippet inside `<head>` of the app's HTML (for Vite/React/Lovable projects: `index.html` at the project root), ship it with `sb redeploy myapp --dir <path>`, run `sb wait myapp`, and verify with `sb check myapp --contains data-website-id`. Confirm events are counted with `sb action analytics test_event` (adds one page view at `/sb-test-event`, tell the user), and read counts with `sb action analytics stats`.
+Then add the snippet inside `<head>` of the app's HTML (for Vite/React/Lovable projects: `index.html` at the project root), ship it with `sb redeploy myapp --dir <path>`, run `sb wait myapp`, and verify with `sb check myapp --contains data-website-id`. Confirm Umami counts events with `sb action analytics test_event` (adds one page view at `/sb-test-event`, tell the user; it is sent from the server, so it proves Umami works, not that a visitor's browser loads the script: `sb check myapp --contains data-website-id` and a public `/script.js` cover that part), and read counts with `sb action analytics stats`.
 
 Tell the user two things:
 - If the tracked app is behind the wall, only signed-in team members' visits are counted. Real visitor numbers need the app to be `public` (`sb access myapp public`, needs approval). Do not request that unless the user wants it.
@@ -159,7 +159,7 @@ Only members of this install can create Vaultwarden accounts: registration needs
 
 ### Writing a template
 
-When the user wants off-the-shelf software that has no template, you can write one: a directory with `template.yaml` (format: `bakery.slicedbread.dev/v1`, see `docs/template-format.md` in the SlicedBread repository), action scripts under `actions/` and config files under `files/`. Pin every image by digest (`name:tag@sha256:...`). Deploy it with `sb deploy <app> --template-dir <path>`; errors in the template are reported with what to fix. A template from a directory is not trusted: its access defaults and public paths need human approval. Prefer catalog templates when one exists.
+When the user wants off-the-shelf software that has no template, you can write one: a directory with `template.yaml` (format: `bakery.slicedbread.dev/v1`, described in `template-format.md` next to this file, or `docs/template-format.md` in the SlicedBread repository; `sb catalog --json` shows complete working examples), action scripts under `actions/` and config files under `files/`. Pin every image by digest (`name:tag@sha256:...`). Deploy it with `sb deploy <app> --template-dir <path>`; errors in the template are reported with what to fix. A template from a directory is not trusted: an access default other than `wall`, and its public paths, need human approval (a `wall` template deploys straight away). Prefer catalog templates when one exists.
 
 ## Data and backups
 
@@ -182,7 +182,7 @@ Each snapshot carries the app's spec, its secret values and, for apps deployed w
 What a restore test checks, so you can report it accurately: restic restores the snapshot into a scratch namespace and verifies every file's content against the backup; the number of restored files must match the backup; template-required files must exist and be non-empty (Vaultwarden: `db.sqlite3`; its SQLite integrity is not checked); a database dump must load into a fresh Postgres with the same number of tables (rows are counted and reported). The first backup of a new app runs once it is running and its template setup has finished (trigger `initial`).
 
 - A restore stops the app, replaces its volumes and database, and starts it again. With an agent token it needs human approval (exit code 3); tell the user what will be lost (everything since that snapshot).
-- Apps that keep SQLite files (Vaultwarden) are stopped for a few seconds during each backup. `sb status` then shows `paused`; it resumes by itself.
+- Apps that keep SQLite files (Vaultwarden, templates with `consistency: stop`) are stopped for a few seconds during each backup, including the first one right after `sb wait` reports ready. `sb status` then shows `paused`; it resumes by itself.
 - If backups are not configured, tell the user to set up a bucket on the dashboard's Settings page. Until then nothing is backed up.
 - Restoring every app from the bucket (for example into a new install) and exporting manifests are dashboard actions for the human.
 
