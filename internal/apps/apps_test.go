@@ -260,12 +260,12 @@ func TestTemplateValidation(t *testing.T) {
 
 func TestBuiltInCatalog(t *testing.T) {
 	for _, name := range []string{"umami", "vaultwarden"} {
-		tm := Catalog[name]
+		tm := CatalogTemplate(name)
 		if tm == nil || !tm.Trusted {
 			t.Fatalf("%s missing or untrusted", name)
 		}
 	}
-	u := Catalog["umami"]
+	u := CatalogTemplate("umami")
 	if a := u.Action("dashboard_login"); a == nil || !a.HasSecretOutput() {
 		t.Fatal("dashboard_login returns a secret")
 	}
@@ -433,7 +433,7 @@ func TestBackupSQLiteValidation(t *testing.T) {
 }
 
 func TestVaultwardenChecksItsSQLite(t *testing.T) {
-	b := Catalog["vaultwarden"].Backup
+	b := CatalogTemplate("vaultwarden").Backup
 	if b == nil || len(b.SQLite) != 1 || b.SQLite[0].Path != "data/db.sqlite3" || strings.Join(b.SQLite[0].Tables, ",") != "users,ciphers" {
 		t.Fatalf("vaultwarden backup: %+v", b)
 	}

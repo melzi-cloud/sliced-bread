@@ -78,6 +78,8 @@ type Server struct {
 	elector           *lease.Elector
 	draining          atomic.Bool
 	imageCheckAt      time.Time
+	catalogCheckAt    time.Time
+	catalogLoadAt     time.Time
 	repoMu            sync.Mutex
 	repoReady         string // repository known to be initialised
 	sharedGCAt        time.Time
@@ -177,6 +179,10 @@ func (s *Server) loop(ctx context.Context) {
 		// Every replica keeps its copy of the auth state current; only the lease holder
 		// runs background work (builds, backups, alerts, registry upkeep).
 		s.auth.refresh(ctx)
+		if time.Since(s.catalogLoadAt) > 30*time.Second {
+			s.loadStoredCatalog(ctx)
+			s.catalogLoadAt = time.Now()
+		}
 		if s.leading() {
 			s.tick(ctx)
 			if time.Since(s.sharedGCAt) > 5*time.Minute {

@@ -51,6 +51,7 @@ func (s *Server) apiMux() http.Handler {
 	m := http.NewServeMux()
 	m.HandleFunc("GET /v1/whoami", s.apiWhoami)
 	m.HandleFunc("GET /v1/catalog", s.apiCatalog)
+	m.HandleFunc("POST /v1/catalog/refresh", s.apiCatalogRefresh)
 	m.HandleFunc("GET /v1/apps", s.apiListApps)
 	m.HandleFunc("POST /v1/apps", s.apiCreateApp)
 	m.HandleFunc("GET /v1/apps/{name}", s.apiGetApp)
@@ -114,9 +115,9 @@ func (s *Server) apiWhoami(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiCatalog(w http.ResponseWriter, r *http.Request) {
 	var out []catalogEntry
 	for _, n := range apps.TemplateNames() {
-		out = append(out, catalogView(apps.Catalog[n]))
+		out = append(out, catalogView(apps.CatalogTemplate(n)))
 	}
-	writeJSON(w, 200, map[string]any{"templates": out})
+	writeJSON(w, 200, map[string]any{"templates": out, "catalog": apps.CurrentCatalog()})
 }
 
 func (s *Server) apiListApps(w http.ResponseWriter, r *http.Request) {

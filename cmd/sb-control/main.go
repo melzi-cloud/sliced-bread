@@ -32,6 +32,9 @@ func main() {
 		}
 		return
 	}
+	if err := control.CheckEmbeddedCatalog(); err != nil {
+		log.Fatal(err)
+	}
 	s, err := control.New(ctx, control.ConfigFromEnv(), k)
 	if err != nil {
 		log.Fatal(err)

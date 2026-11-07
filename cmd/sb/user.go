@@ -478,8 +478,38 @@ func runUser(args []string) error {
 		return nil
 
 	case "catalog":
+		refresh := fs.Bool("refresh", false, "")
 		if _, err := parse(fs, rest); err != nil {
 			return err
+		}
+		if *refresh {
+			b, _, err := c.slow().call("POST", "/v1/catalog/refresh", nil)
+			if err != nil {
+				return err
+			}
+			if *jsonOut {
+				c.print(b)
+				return nil
+			}
+			var r struct {
+				Serial, Previous int64
+				Built, Source    string
+				Changed          bool
+				Templates        []string
+				Skipped          []string
+			}
+			json.Unmarshal(b, &r)
+			if r.Changed {
+				fmt.Printf("catalog updated: serial %d -> %d (built %s from %s)\n", r.Previous, r.Serial, r.Built, r.Source)
+			} else {
+				fmt.Printf("catalog is up to date: serial %d (built %s)\n", r.Serial, r.Built)
+			}
+			fmt.Println("templates:", strings.Join(r.Templates, ", "))
+			for _, s := range r.Skipped {
+				fmt.Println("skipped:", s)
+			}
+			fmt.Println("apps already deployed keep their template version until updated")
+			return nil
 		}
 		b, _, err := c.call("GET", "/v1/catalog", nil)
 		if err != nil {
@@ -502,8 +532,15 @@ func runUser(args []string) error {
 				Actions []actionInfo
 				Setup   []struct{ Name, Description string }
 			}
+			Catalog struct {
+				Serial      int64
+				Built, From string
+			}
 		}
 		json.Unmarshal(b, &cat)
+		if cat.Catalog.Serial > 0 {
+			fmt.Printf("catalog serial %d, built %s (%s; signed by the bakery key). Newer: sb catalog --refresh\n\n", cat.Catalog.Serial, cat.Catalog.Built, cat.Catalog.From)
+		}
 		for _, t := range cat.Templates {
 			fmt.Printf("%s %s: %s\n  access: %s; components: %s", t.Name, t.Version, t.Description, t.Access, strings.Join(t.Components, ", "))
 			if t.Database {

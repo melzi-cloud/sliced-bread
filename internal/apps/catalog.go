@@ -1,56 +1,10 @@
 package apps
 
 import (
-	"embed"
 	"encoding/json"
 	"fmt"
-	"io/fs"
-	"sort"
 	"strings"
 )
-
-// The built-in catalog. Templates live in internal/apps/templates/<name>/ in the bakery
-// layout (template.yaml, actions/, files/); they move to the signed bakery index with
-// the template registry (task #16).
-//
-//go:embed templates
-var templatesFS embed.FS
-
-// Catalog lists the built-in templates by name.
-var Catalog = loadCatalog()
-
-func loadCatalog() map[string]*Template {
-	out := map[string]*Template{}
-	ents, err := fs.ReadDir(templatesFS, "templates")
-	if err != nil {
-		panic(err)
-	}
-	for _, e := range ents {
-		if !e.IsDir() {
-			continue
-		}
-		t, err := LoadTemplate(templatesFS, "templates/"+e.Name())
-		if err != nil {
-			panic("built-in template " + e.Name() + ": " + err.Error())
-		}
-		if t.Name != e.Name() {
-			panic("built-in template directory " + e.Name() + " holds template " + t.Name)
-		}
-		t.Trusted = true
-		out[t.Name] = t
-	}
-	return out
-}
-
-// TemplateNames returns sorted template names.
-func TemplateNames() []string {
-	var out []string
-	for k := range Catalog {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
 
 func cloneTemplate(t *Template) *Template {
 	b, _ := json.Marshal(t)
@@ -65,8 +19,8 @@ func cloneTemplate(t *Template) *Template {
 // keep those, so a settings change never resets what the user chose.
 func ApplyTemplate(a *App) error {
 	if a.TemplateDef == nil {
-		cat, ok := Catalog[a.Template]
-		if !ok {
+		cat := CatalogTemplate(a.Template)
+		if cat == nil {
 			return fmt.Errorf("unknown template %q (see: sb catalog)", a.Template)
 		}
 		a.TemplateDef = cloneTemplate(cat)
@@ -158,7 +112,7 @@ func TemplateOf(a *App) *Template {
 	if a.TemplateDef != nil {
 		return a.TemplateDef
 	}
-	return Catalog[a.Template]
+	return CatalogTemplate(a.Template)
 }
 
 // CheckUserEnv refuses env keys a template controls itself.

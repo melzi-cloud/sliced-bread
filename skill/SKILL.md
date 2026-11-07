@@ -114,7 +114,7 @@ Note: environment variables (and secrets) only reach code that runs on the serve
 
 ## Templates
 
-Run `sb catalog` for the current list. Each template documents its components, settings, actions, setup steps and notes. `sb status <app>` shows them for a deployed app, plus which setup steps the user still has to do.
+Run `sb catalog` for the current list. `sb catalog --refresh` fetches the latest signed catalog (new templates and template versions); apps already deployed keep the version they were created from. Each template documents its components, settings, actions, setup steps and notes. `sb status <app>` shows them for a deployed app, plus which setup steps the user still has to do.
 
 ### Template actions
 
@@ -159,7 +159,7 @@ Only members of this install can create Vaultwarden accounts: registration needs
 
 ### Writing a template
 
-When the user wants off-the-shelf software that has no template, you can write one: a directory with `template.yaml` (format: `bakery.slicedbread.dev/v1`, described in `template-format.md` next to this file, or `docs/template-format.md` in the SlicedBread repository; `sb catalog --json` shows complete working examples), action scripts under `actions/` and config files under `files/`. Pin every image by digest (`name:tag@sha256:...`). Deploy it with `sb deploy <app> --template-dir <path>`; errors in the template are reported with what to fix. A template from a directory is not trusted: an access default other than `wall`, and its public paths, need human approval (a `wall` template deploys straight away). Prefer catalog templates when one exists.
+When the user wants off-the-shelf software that has no template, you can write one: a directory with `template.yaml` (format: `bakery.slicedbread.dev/v1`, described in `template-format.md` next to this file, or `docs/template-format.md` in the SlicedBread repository; the templates in https://github.com/melzi-cloud/bakery are complete working examples), action scripts under `actions/` and config files under `files/`. Pin every image by digest (`name:tag@sha256:...`). Deploy it with `sb deploy <app> --template-dir <path>`; errors in the template are reported with what to fix. A template from a directory is not trusted: an access default other than `wall`, and its public paths, need human approval (a `wall` template deploys straight away). Prefer catalog templates when one exists.
 
 ## Data and backups
 

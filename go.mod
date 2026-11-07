@@ -3,8 +3,10 @@ module github.com/melzi-cloud/sliced-bread
 go 1.27.1
 
 require (
+	aead.dev/minisign v0.3.0
 	github.com/google/go-containerregistry v0.22.1
 	github.com/hetznercloud/hcloud-go/v2 v2.53.0
+	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/crypto v0.58.0
 	golang.org/x/term v0.47.0
 )
@@ -23,7 +25,6 @@ require (
 	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect

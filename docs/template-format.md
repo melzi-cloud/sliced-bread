@@ -1,6 +1,6 @@
 # Template format v1
 
-Status: implemented (D-032, 2026-11-07). The built-in templates are in `internal/apps/templates/`; they move to `melzi-cloud/bakery` with the template registry (task #16). Builds on D-029 (actions are container jobs, multi-component apps come with the format) and D-030 (agents never see or write secret values).
+Status: implemented (D-032, 2026-11-07). Templates live in the public repository [melzi-cloud/bakery](https://github.com/melzi-cloud/bakery) and reach installs as a signed catalog (D-035). Builds on D-029 (actions are container jobs, multi-component apps come with the format) and D-030 (agents never see or write secret values).
 
 ## Goals
 
@@ -28,7 +28,7 @@ bakery/
     README.md            for humans browsing the catalog
 ```
 
-CI will build a signed index of all templates (minisign, task #16): names, versions, image digests and the content hash of every file. Catalog templates will then have to match the index. Until then the catalog is built into sb-control. A template deployed from a directory (`sb deploy <app> --template-dir <path>`) is never in the index: it is untrusted, so access wider than `wall` and its public paths need a human's approval. A `wall` template from a directory deploys without approval.
+On every push to bakery's `main`, CI validates every template with SlicedBread's own validator (`hack/bakery`) and publishes one signed catalog as a release: `catalog.json` holds every template's files, version, tier, image digests and a hash of its files, with a serial that increases with each publish; `catalog.json.minisig` is its minisign signature. sb-control has the public key built in, starts with the catalog it shipped with (`internal/apps/catalog/`, refreshed with `make catalog-snapshot`), and installs a newer one with `sb catalog --refresh` or its daily check. A catalog whose signature does not verify, whose files do not match their hashes, or whose serial is older than the one in use is refused. Only the `verified` tier is offered for now. Apps keep the copy of the template they were created from. A template deployed from a directory (`sb deploy <app> --template-dir <path>`) is never in the index: it is untrusted, so access wider than `wall` and its public paths need a human's approval. A `wall` template from a directory deploys without approval.
 
 ## Top-level fields
 
@@ -324,7 +324,7 @@ const url = process.env.SB_APP_URL + "/script.js";
 console.log(JSON.stringify({ website_id: site.id, snippet: `<script defer src="${url}" data-website-id="${site.id}"></script>` }));
 ```
 
-The real scripts are in `internal/apps/templates/umami/actions/`.
+The real scripts are in [bakery/umami/actions](https://github.com/melzi-cloud/bakery/tree/main/umami/actions).
 
 ### Multi-component sketch: Invidious
 
@@ -367,4 +367,4 @@ secrets:
 5. Settings types: enum, string (with optional pattern), number, boolean.
 6. Replicas are fixed numbers; autoscaling later.
 7. No time-based behaviour: Vaultwarden's 15-minute signup window is replaced by team-only registration (`wallPaths`) and a setup step that completes itself.
-8. The index is signed with minisign.
+8. The catalog is signed with minisign (D-035); bakery is public under Apache-2.0, and only verified templates are offered at launch.

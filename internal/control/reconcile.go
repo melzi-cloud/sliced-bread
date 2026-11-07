@@ -429,6 +429,7 @@ func (s *Server) tick(ctx context.Context) {
 		s.evaluateAlerts(ctx, fresh, bc)
 		s.maybeCheckImages(ctx, fresh)
 	}
+	s.maybeRefreshCatalog(ctx)
 }
 
 // --- status ---

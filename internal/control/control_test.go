@@ -324,7 +324,7 @@ func TestDeviceFlow(t *testing.T) {
 }
 
 func TestActionOutputAndMasking(t *testing.T) {
-	act := apps.Catalog["umami"].Action("dashboard_login")
+	act := apps.CatalogTemplate("umami").Action("dashboard_login")
 	out, err := checkOutput(act, map[string]any{"url": "https://x", "username": "admin", "password": "pw-123456", "extra": 1})
 	if err != nil || out["extra"] != nil || out["password"] != "pw-123456" {
 		t.Fatalf("output %v %v", out, err)
@@ -336,14 +336,14 @@ func TestActionOutputAndMasking(t *testing.T) {
 	if js(m) != `{"a":"token [secret] here","b":["[secret]"]}` {
 		t.Fatalf("masked %s", js(m))
 	}
-	create := apps.Catalog["umami"].Action("create_website")
+	create := apps.CatalogTemplate("umami").Action("create_website")
 	if err := checkInput(create, map[string]string{"name": "x"}); err == nil {
 		t.Fatal("missing required input accepted")
 	}
 	if err := checkInput(create, map[string]string{"name": "x", "domain": "a.b", "bogus": "1"}); err == nil {
 		t.Fatal("unknown input accepted")
 	}
-	stats := apps.Catalog["umami"].Action("stats")
+	stats := apps.CatalogTemplate("umami").Action("stats")
 	if err := checkInput(stats, map[string]string{"hours": "abc"}); err == nil {
 		t.Fatal("number input must be a number")
 	}
