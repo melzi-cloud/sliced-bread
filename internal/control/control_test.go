@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -21,41 +22,147 @@ func testServer() *Server {
 }
 
 func TestSessionRoundTrip(t *testing.T) {
-	a := &Auth{key: []byte("secret")}
+	a := &Auth{key: []byte("secret"), domain: "r1.test.slicedbread.dev"}
 	now := time.Unix(1_800_000_000, 0)
-	v := a.NewSession("me@x.dev", now)
-	if e, err := a.ParseSession(v, now.Add(time.Hour)); err != nil || e != "me@x.dev" {
+	v := a.NewSession("me@x.dev", "crm.r1.test.slicedbread.dev", kindApp, time.Hour, now)
+	if e, err := a.ParseSession(v, "crm.r1.test.slicedbread.dev", kindApp, now); err != nil || e != "me@x.dev" {
 		t.Fatalf("parse = %q, %v", e, err)
 	}
-	if _, err := a.ParseSession(v, now.Add(sessionTTL+time.Second)); err == nil {
-		t.Fatal("expired session accepted")
+	bad := []struct {
+		name string
+		v    string
+		host string
+		kind string
+		at   time.Time
+		auth *Auth
+	}{
+		{"expired", v, "crm.r1.test.slicedbread.dev", kindApp, now.Add(2 * time.Hour), a},
+		{"other host", v, "vault.r1.test.slicedbread.dev", kindApp, now, a},
+		{"other kind", v, "crm.r1.test.slicedbread.dev", kindAuth, now, a},
+		{"tampered", v[:len(v)-2] + "xx", "crm.r1.test.slicedbread.dev", kindApp, now, a},
+		{"other key", v, "crm.r1.test.slicedbread.dev", kindApp, now, &Auth{key: []byte("other"), domain: a.domain}},
+		{"other install", v, "crm.r1.test.slicedbread.dev", kindApp, now, &Auth{key: []byte("secret"), domain: "r2.test.slicedbread.dev"}},
 	}
-	if _, err := a.ParseSession(v[:len(v)-2]+"xx", now); err == nil {
-		t.Fatal("tampered signature accepted")
-	}
-	other := &Auth{key: []byte("other")}
-	if _, err := other.ParseSession(v, now); err == nil {
-		t.Fatal("session signed with another key accepted")
+	for _, b := range bad {
+		if _, err := b.auth.ParseSession(b.v, b.host, b.kind, b.at); err == nil {
+			t.Errorf("%s: accepted", b.name)
+		}
 	}
 }
 
-func TestVerifyStripsSessionCookie(t *testing.T) {
-	s := testServer()
-	sess := s.auth.NewSession("me@x.dev", time.Now())
-	r := httptest.NewRequest("GET", "http://sb-control.sb-system.svc.cluster.local:8080/auth/verify?app=crm", nil)
+func verifyReq(host, uri string, cookies ...*http.Cookie) *http.Request {
+	r := httptest.NewRequest("GET", "/auth/verify?app=crm", nil)
 	r.Host = "sb-control.sb-system.svc.cluster.local:8080"
-	r.Header.Set("Cookie", "theme=dark; "+SessionCookie+"="+sess+"; "+csrfCookie+"=abc; app_sid=42")
+	r.Header.Set("X-Forwarded-Host", host)
+	r.Header.Set("X-Forwarded-Uri", uri)
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("Accept", "text/html")
+	for _, c := range cookies {
+		r.AddCookie(c)
+	}
+	return r
+}
+
+func TestExchangeGivesAppHostItsOwnSession(t *testing.T) {
+	s := testServer()
+	host := "crm.r1.test.slicedbread.dev"
+	loc := s.exchangeURL("me@x.dev", "https://"+host+"/deals?id=7")
+	u, _ := url.Parse(loc)
+	if u.Host != host || u.Path != exchangePath {
+		t.Fatalf("exchange url %s", loc)
+	}
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
-	if w.Code != 200 {
-		t.Fatalf("code %d", w.Code)
+	s.Handler().ServeHTTP(w, verifyReq(host, u.RequestURI()))
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "https://"+host+"/deals?id=7" {
+		t.Fatalf("exchange: %d %s", w.Code, w.Header().Get("Location"))
 	}
-	if got := w.Header().Get("X-Sb-User"); got != "me@x.dev" {
-		t.Fatalf("X-Sb-User = %q", got)
+	sc := w.Result().Cookies()
+	if len(sc) != 1 || sc[0].Name != AppCookie || sc[0].Domain != "" || !sc[0].Secure || sc[0].Path != "/" {
+		t.Fatalf("app cookie must be host-only __Host-: %+v", sc)
 	}
-	c := w.Header().Get("Cookie")
-	if strings.Contains(c, SessionCookie) || strings.Contains(c, csrfCookie) || c != "theme=dark; app_sid=42" {
-		t.Fatalf("filtered cookie header = %q", c)
+	// The same link cannot be used twice.
+	w2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w2, verifyReq(host, u.RequestURI()))
+	if w2.Code != http.StatusForbidden {
+		t.Fatalf("replayed exchange: %d", w2.Code)
+	}
+	// A link minted for one app does not work on another.
+	other := s.exchangeURL("me@x.dev", "https://vault.r1.test.slicedbread.dev/")
+	ou, _ := url.Parse(other)
+	w3 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w3, verifyReq(host, ou.RequestURI()))
+	if w3.Code != http.StatusForbidden {
+		t.Fatalf("cross-host exchange: %d", w3.Code)
+	}
+	// The minted cookie opens the wall, and the app never sees it.
+	w4 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w4, verifyReq(host, "/deals", sc[0], &http.Cookie{Name: "theme", Value: "dark"}))
+	if w4.Code != 200 || w4.Header().Get("X-Sb-User") != "me@x.dev" || w4.Header().Get("Cookie") != "theme=dark" {
+		t.Fatalf("verify: %d user=%q cookie=%q", w4.Code, w4.Header().Get("X-Sb-User"), w4.Header().Get("Cookie"))
+	}
+	// Open-redirect attempts fall back to /.
+	evil := s.exchangeURL("me@x.dev", "https://"+host+"/")
+	eu, _ := url.Parse(evil)
+	q := eu.Query()
+	q.Set("rd", "//evil.com/x")
+	eu.RawQuery = q.Encode()
+	w5 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w5, verifyReq(host, eu.RequestURI()))
+	if w5.Header().Get("Location") != "https://"+host+"/" {
+		t.Fatalf("open redirect: %s", w5.Header().Get("Location"))
+	}
+}
+
+// A sibling host (another tenant, or any app) can set cookies for the parent domain.
+// Those must not open the wall, shadow a real session, or break approvals.
+func TestConflictingParentDomainCookies(t *testing.T) {
+	s := testServer()
+	host := "crm.r1.test.slicedbread.dev"
+	good := &http.Cookie{Name: AppCookie, Value: s.auth.NewSession("me@x.dev", host, kindApp, time.Hour, time.Now())}
+	junk := []*http.Cookie{
+		{Name: "sb_session", Value: "attacker"}, {Name: "sb_csrf", Value: "attacker"},
+		{Name: "sb_s_r1", Value: "attacker"},
+		// A session minted for another host of the same install, replayed here.
+		{Name: AppCookie, Value: s.auth.NewSession("me@x.dev", "evil.r1.test.slicedbread.dev", kindApp, time.Hour, time.Now())},
+	}
+	// Junk alone does not open the wall.
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, verifyReq(host, "/", junk...))
+	if w.Code == 200 {
+		t.Fatal("junk cookies opened the wall")
+	}
+	// Junk next to a real session (in either order) does not break it, and none of it reaches the app.
+	for _, order := range [][]*http.Cookie{append(append([]*http.Cookie{}, junk...), good), append([]*http.Cookie{good}, junk...)} {
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, verifyReq(host, "/", order...))
+		if w.Code != 200 || w.Header().Get("X-Sb-User") != "me@x.dev" {
+			t.Fatalf("real session shadowed: %d", w.Code)
+		}
+		if strings.Contains(w.Header().Get("Cookie"), "attacker") || strings.Contains(w.Header().Get("Cookie"), "sb_") {
+			t.Fatalf("our cookies leaked to the app: %q", w.Header().Get("Cookie"))
+		}
+	}
+
+	// Approvals form: CSRF is bound to the session, so a planted sb_csrf cookie neither helps nor hurts.
+	auth := "auth.r1.test.slicedbread.dev"
+	sess := &http.Cookie{Name: SessionCookie, Value: s.auth.NewSession("me@x.dev", auth, kindAuth, time.Hour, time.Now())}
+	post := func(token string, cookies ...*http.Cookie) bool {
+		r := httptest.NewRequest("POST", "https://"+auth+"/approvals/x", strings.NewReader("csrf="+url.QueryEscape(token)))
+		r.Host = auth
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		for _, c := range cookies {
+			r.AddCookie(c)
+		}
+		return s.checkCSRF(r)
+	}
+	if !post(s.sessionCSRF(sess.Value), append([]*http.Cookie{sess}, junk...)...) {
+		t.Fatal("planted cookies broke a valid approval")
+	}
+	if post("attacker", append([]*http.Cookie{sess}, junk...)...) {
+		t.Fatal("attacker-chosen CSRF value accepted")
+	}
+	if post("attacker", &http.Cookie{Name: "__Host-sb_csrf", Value: "attacker"}, &http.Cookie{Name: "sb_csrf", Value: "attacker"}, sess) {
+		t.Fatal("double-submit cookie must not apply once signed in")
 	}
 }
 

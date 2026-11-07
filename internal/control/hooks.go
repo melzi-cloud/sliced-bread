@@ -163,7 +163,7 @@ func (s *Server) runAction(ctx context.Context, a *apps.App, action string, inpu
 		if _, err := postJSON(ctx, internalURL(a)+"/api/websites", login.Token, map[string]string{"name": name, "domain": domain}, &site); err != nil {
 			return nil, fmt.Errorf("create website: %w", err)
 		}
-		script := "https://" + apps.Host(a.Name, s.cfg.Domain) + "/script.js"
+		script := "https://" + s.hosts().App(a.Name) + "/script.js"
 		return map[string]any{
 			"website_id": site.ID,
 			"name":       site.Name,
@@ -280,7 +280,7 @@ func (s *Server) runAction(ctx context.Context, a *apps.App, action string, inpu
 		if a.Hooks["admin-password"] != "set" {
 			pw = "umami (default, will be replaced once the app is running)"
 		}
-		return map[string]any{"url": "https://" + apps.Host(a.Name, s.cfg.Domain), "username": "admin", "password": pw}, nil
+		return map[string]any{"url": "https://" + s.hosts().App(a.Name), "username": "admin", "password": pw}, nil
 	}
 	return nil, fmt.Errorf("app %s (template %q) has no action %q", a.Name, a.Template, action)
 }

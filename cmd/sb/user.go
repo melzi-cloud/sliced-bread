@@ -35,6 +35,12 @@ func (e *exitErr) Error() string { return e.msg }
 
 const userUsage = `sb: deploy and operate apps on SlicedBread.
 
+Install (on your own Hetzner account)
+  sb init --domain apps.example.com --email you@example.com [--size 1|3]   see: sb init --help
+  sb installs                         installs created from this machine
+  sb upgrade <install-id>             roll out the control plane built into this sb
+  sb destroy <install-id>             delete an install and all its data
+
 Setup
   sb login --api https://api.<tenant-domain>    prints a link; a human approves in the browser
   sb login --api https://api.<tenant-domain> --token-stdin   (token on stdin instead)

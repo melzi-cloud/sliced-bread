@@ -35,6 +35,44 @@ type Dev struct {
 
 	Owner string
 	TTL   time.Duration
+
+	// Self-hosted installs (sb init). Dev runs leave these empty.
+	Domain   string // base domain for apps; empty means <run-id>.<TestDomain>
+	Nodes    int    // 1 or 3; 0 means 3
+	NoExpiry bool   // label resources sb/expires-at=never
+	Fallback *EAB   // optional second ACME issuer
+}
+
+// EAB is an ACME external account binding for a fallback issuer (ZeroSSL or Google Trust Services).
+type EAB struct {
+	Server string
+	KeyID  string
+	HMAC   string
+}
+
+// FallbackServers maps issuer names to ACME directories.
+var FallbackServers = map[string]string{
+	"zerossl": "https://acme.zerossl.com/v2/DV90",
+	"google":  "https://dv.acme-v02.api.pki.goog/directory",
+}
+
+// LetsEncryptProduction is the production ACME directory.
+const LetsEncryptProduction = "https://acme-v02.api.letsencrypt.org/directory"
+
+// NodeCount returns the configured node count.
+func (d Dev) NodeCount() int {
+	if d.Nodes == 0 {
+		return 3
+	}
+	return d.Nodes
+}
+
+// DNSScope is the name under which this provisioner's DNS records live.
+func (d Dev) DNSScope() string {
+	if d.Domain != "" {
+		return d.Domain
+	}
+	return d.TestDomain
 }
 
 // Defaults that are safe for development.

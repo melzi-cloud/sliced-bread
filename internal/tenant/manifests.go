@@ -32,10 +32,30 @@ spec:
         nodePort: 30443
 `
 
+// traefikSingleNode keeps the default LoadBalancer service, which k3s servicelb binds to 80/443 on the node.
+const traefikSingleNode = `apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    deployment:
+      replicas: 1
+    service:
+      type: LoadBalancer
+`
+
 // ServerManifests returns files for /var/lib/rancher/k3s/server/manifests.
-func ServerManifests() map[string]string {
+func ServerManifests(nodes int) map[string]string {
+	if nodes == 1 {
+		return map[string]string{"sb-traefik-config.yaml": traefikSingleNode}
+	}
 	return map[string]string{"sb-traefik-config.yaml": traefikConfig}
 }
+
+// FallbackIssuerName is the second ACME issuer used when the first cannot issue.
+const FallbackIssuerName = "fallback"
 
 // AddonParams fill the addon templates. Secrets are not part of these templates.
 type AddonParams struct {
@@ -46,6 +66,8 @@ type AddonParams struct {
 	DNSZone            string
 	WildcardDomain     string // e.g. *.r1234567.test.slicedbread.dev
 	ACMEServer         string
+	FallbackServer     string // optional; needs the fallback-eab secret
+	FallbackKeyID      string // EAB key id (not secret on its own)
 	CertManagerVersion string
 	HcloudCSIVersion   string
 }
@@ -111,6 +133,32 @@ spec:
             apiTokenSecretRef:
               name: cloudflare-api-token
               key: api-token
+{{- if .FallbackServer}}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ` + FallbackIssuerName + `
+spec:
+  acme:
+    server: {{.FallbackServer}}
+    externalAccountBinding:
+      keyID: "{{.FallbackKeyID}}"
+      keySecretRef:
+        name: fallback-eab
+        key: hmac
+    privateKeySecretRef:
+      name: ` + FallbackIssuerName + `-account
+    solvers:
+      - selector:
+          dnsZones:
+            - {{.DNSZone}}
+        dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token
+{{- end}}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -145,6 +193,7 @@ func TLSManifest(p AddonParams) (string, error) { return render(tlsTmpl, p) }
 type SecretsInput struct {
 	HcloudToken     string
 	CloudflareToken string
+	FallbackHMAC    string // optional EAB HMAC key
 }
 
 var secretsTmpl = template.Must(template.New("secrets").Parse(`apiVersion: v1
@@ -164,6 +213,27 @@ metadata:
 type: Opaque
 stringData:
   api-token: {{printf "%q" .CloudflareToken}}
+{{- if .FallbackHMAC}}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fallback-eab
+  namespace: cert-manager
+type: Opaque
+stringData:
+  hmac: {{printf "%q" .FallbackHMAC}}
+{{- end}}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sb-provider
+  namespace: sb-system
+type: Opaque
+stringData:
+  hcloud-token: {{printf "%q" .HcloudToken}}
+  cloudflare-token: {{printf "%q" .CloudflareToken}}
 `))
 
 // SecretsManifest renders the tenant secrets. Only ever send the result over stdin.

@@ -404,7 +404,7 @@ type AppStatus struct {
 
 func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 	st := AppStatus{
-		Name: a.Name, URL: "https://" + apps.Host(a.Name, s.cfg.Domain), Template: a.Template,
+		Name: a.Name, URL: "https://" + s.hosts().App(a.Name), Template: a.Template,
 		Access: a.Access, PublicPaths: a.PublicPaths, Build: a.Build, Settings: a.Settings, SecretKeys: a.SecretKeys,
 	}
 	st.Env = map[string]string{}

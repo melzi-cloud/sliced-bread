@@ -78,6 +78,8 @@ func New(ctx context.Context, cfg Config, k *kube.Client) (*Server, error) {
 	return &Server{cfg: cfg, kube: k, auth: a, logf: log.Printf, devices: deviceStore{grants: map[string]*deviceGrant{}}}, nil
 }
 
+func (s *Server) hosts() apps.Hosts { return apps.Hosts{Domain: s.cfg.Domain} }
+
 func (s *Server) params(a *apps.App, secretVersion string) apps.Params {
 	return apps.Params{Domain: s.cfg.Domain, AuthService: "http://" + s.cfg.InternalHostname + ":8080", SecretVersion: secretVersion}
 }
@@ -104,9 +106,9 @@ func (s *Server) Handler() http.Handler {
 				}
 				http.NotFound(w, r)
 			}
-		case host == "api."+s.cfg.Domain:
+		case host == s.hosts().API():
 			api.ServeHTTP(w, r)
-		case host == "auth."+s.cfg.Domain:
+		case host == s.hosts().Auth():
 			ui.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)

@@ -30,6 +30,8 @@ type State struct {
 	LBIP       string    `json:"lb_ip"`
 	Nodes      []Node    `json:"nodes"`
 	DNSRecords []string  `json:"dns_records"`
+	Size       int       `json:"size"`
+	DNSZone    string    `json:"dns_zone"`
 	Dir        string    `json:"-"`
 }
 

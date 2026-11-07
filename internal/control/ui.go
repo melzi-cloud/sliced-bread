@@ -67,7 +67,13 @@ func (s *Server) render(w http.ResponseWriter, d pageData) {
 func (s *Server) uiMux() http.Handler {
 	m := http.NewServeMux()
 	m.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
-		s.render(w, pageData{Page: "login", CSRF: s.csrf(w, r), RD: r.URL.Query().Get("rd")})
+		rd := r.URL.Query().Get("rd")
+		if email, ok := s.auth.SessionFromRequest(r); ok {
+			// Already signed in on the auth host: hand the app host its own session.
+			http.Redirect(w, r, s.afterLogin(email, rd), http.StatusFound)
+			return
+		}
+		s.render(w, pageData{Page: "login", CSRF: s.csrf(w, r), RD: rd})
 	})
 	m.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
 		rd := r.PostFormValue("rd")
@@ -81,14 +87,11 @@ func (s *Server) uiMux() http.Handler {
 			s.render(w, pageData{Page: "login", Error: "Wrong email or password.", CSRF: s.csrf(w, r), RD: rd})
 			return
 		}
-		s.setCookie(w, SessionCookie, s.auth.NewSession(email, time.Now()), int(sessionTTL.Seconds()), true)
-		if !SafeRedirect(rd, s.cfg.Domain) {
-			rd = "/"
-		}
-		http.Redirect(w, r, rd, http.StatusFound)
+		s.setCookie(w, SessionCookie, s.auth.NewSession(email, requestHost(r), kindAuth, sessionTTL, time.Now()), int(sessionTTL.Seconds()))
+		http.Redirect(w, r, s.afterLogin(email, rd), http.StatusFound)
 	})
 	m.HandleFunc("GET /logout", func(w http.ResponseWriter, r *http.Request) {
-		s.setCookie(w, SessionCookie, "", -1, true)
+		s.setCookie(w, SessionCookie, "", -1)
 		http.Redirect(w, r, "/login", http.StatusFound)
 	})
 	m.HandleFunc("GET /{$}", s.requireSession(func(w http.ResponseWriter, r *http.Request, email string) {
@@ -150,11 +153,23 @@ func (s *Server) uiMux() http.Handler {
 	return m
 }
 
+// afterLogin returns where to send a signed-in browser: an app host gets an exchange link.
+func (s *Server) afterLogin(email, rd string) string {
+	if !SafeRedirect(rd, s.cfg.Domain) {
+		return "/"
+	}
+	u, _ := url.Parse(rd)
+	if strings.EqualFold(u.Hostname(), s.hosts().Auth()) {
+		return rd
+	}
+	return s.exchangeURL(email, rd)
+}
+
 func (s *Server) requireSession(h func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		email, ok := s.auth.SessionFromRequest(r)
 		if !ok {
-			http.Redirect(w, r, "/login?rd="+url.QueryEscape("https://auth."+s.cfg.Domain+r.URL.RequestURI()), http.StatusFound)
+			http.Redirect(w, r, "/login?rd="+url.QueryEscape("https://"+s.hosts().Auth()+r.URL.RequestURI()), http.StatusFound)
 			return
 		}
 		h(w, r, email)

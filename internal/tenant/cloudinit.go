@@ -21,6 +21,7 @@ type NodeConfig struct {
 	HostKeyPriv string // OpenSSH private host key
 	HostKeyPub  string // authorized_keys format
 	Manifests   map[string]string
+	SingleNode  bool // keep k3s servicelb so Traefik binds 80/443 on the node
 }
 
 var userDataTmpl = template.Must(template.New("ud").Funcs(template.FuncMap{
@@ -106,7 +107,9 @@ ARGS=(server
   --node-ip "$PRIV_IP"
   --advertise-address "$PRIV_IP"
   --flannel-iface "$PRIV_IF"
+{{- if not .SingleNode}}
   --disable servicelb
+{{- end}}
   --disable local-storage
   --secrets-encryption
   --write-kubeconfig-mode 0600)

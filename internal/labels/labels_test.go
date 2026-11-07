@@ -66,3 +66,13 @@ func TestWith(t *testing.T) {
 		t.Fatal("With must not mutate base")
 	}
 }
+
+func TestNever(t *testing.T) {
+	l := For("rabcdefg", "me", time.Time{})
+	if l[ExpiresAt] != Never || Expired(l, time.Unix(1<<40, 0)) {
+		t.Fatalf("installs must never expire: %v", l)
+	}
+	if ParseDNSComment(DNSComment("rabcdefg", time.Time{}))[ExpiresAt] != Never {
+		t.Fatal("dns comment must carry never")
+	}
+}

@@ -46,8 +46,6 @@ func New(cfg config.Dev, stateRoot string) *Provisioner {
 	}
 }
 
-const nodeCount = 3
-
 func networkZone(location string) (hcloud.NetworkZone, error) {
 	switch location {
 	case "fsn1", "nbg1", "hel1":
@@ -98,11 +96,22 @@ func (p *Provisioner) Up(ctx context.Context, runID string) (*State, error) {
 		return nil, fmt.Errorf("invalid run id %q", runID)
 	}
 	c := p.Cfg
-	expires := time.Now().Add(c.TTL).UTC().Truncate(time.Second)
+	var expires time.Time
+	if !c.NoExpiry {
+		expires = time.Now().Add(c.TTL).UTC().Truncate(time.Second)
+	}
 	base := labels.For(runID, c.Owner, expires)
+	domain := c.Domain
+	if domain == "" {
+		domain = runID + "." + c.TestDomain
+	}
+	nodes := c.NodeCount()
+	if nodes != 1 && nodes != 3 {
+		return nil, fmt.Errorf("size must be 1 or 3 nodes, got %d", nodes)
+	}
 	st := &State{
 		RunID: runID, Owner: c.Owner, ExpiresAt: expires, Location: c.Location,
-		Domain: runID + "." + c.TestDomain, Dir: runDir(p.StateRoot, runID),
+		Domain: domain, Dir: runDir(p.StateRoot, runID), Size: nodes, DNSZone: c.DNSZone,
 	}
 	name := "sb-" + runID
 
@@ -144,16 +153,25 @@ func (p *Provisioner) Up(ctx context.Context, runID string) (*State, error) {
 	if err != nil {
 		return st, fmt.Errorf("create network: %w", err)
 	}
-	// No public inbound rules except SSH from the operator. HTTP(S) arrives through
+	// 3 nodes: no public inbound rules except SSH from the operator. HTTP(S) arrives through
 	// the load balancer over the private network, which Hetzner firewalls do not filter.
-	fwRes, _, err := p.HC.Firewall.Create(ctx, hcloud.FirewallCreateOpts{
-		Name: name, Labels: base,
-		Rules: []hcloud.FirewallRule{{
-			Direction: hcloud.FirewallRuleDirectionIn, Protocol: hcloud.FirewallRuleProtocolTCP,
-			Port: hcloud.Ptr("22"), SourceIPs: []net.IPNet{{IP: opIP, Mask: net.CIDRMask(32, 32)}},
-			Description: hcloud.Ptr("ssh from operator"),
-		}},
-	})
+	// 1 node: no load balancer, so 80/443 are open on the node itself.
+	rules := []hcloud.FirewallRule{{
+		Direction: hcloud.FirewallRuleDirectionIn, Protocol: hcloud.FirewallRuleProtocolTCP,
+		Port: hcloud.Ptr("22"), SourceIPs: []net.IPNet{{IP: opIP, Mask: net.CIDRMask(32, 32)}},
+		Description: hcloud.Ptr("ssh from operator"),
+	}}
+	if nodes == 1 {
+		_, any4, _ := net.ParseCIDR("0.0.0.0/0")
+		_, any6, _ := net.ParseCIDR("::/0")
+		for _, port := range []string{"80", "443"} {
+			rules = append(rules, hcloud.FirewallRule{
+				Direction: hcloud.FirewallRuleDirectionIn, Protocol: hcloud.FirewallRuleProtocolTCP,
+				Port: hcloud.Ptr(port), SourceIPs: []net.IPNet{*any4, *any6}, Description: hcloud.Ptr("web"),
+			})
+		}
+	}
+	fwRes, _, err := p.HC.Firewall.Create(ctx, hcloud.FirewallCreateOpts{Name: name, Labels: base, Rules: rules})
 	if err != nil {
 		return st, fmt.Errorf("create firewall: %w", err)
 	}
@@ -181,7 +199,7 @@ func (p *Provisioner) Up(ctx context.Context, runID string) (*State, error) {
 		ud, err := RenderUserData(NodeConfig{
 			Init: i == 1, JoinAddr: joinAddr, Token: token, K3sVersion: c.K3sVersion,
 			HostKeyPriv: string(hostKey.PrivatePEM), HostKeyPub: hostKey.AuthorizedKey,
-			Manifests: ServerManifests(),
+			Manifests: ServerManifests(nodes), SingleNode: nodes == 1,
 		})
 		if err != nil {
 			return Node{}, err
@@ -223,7 +241,7 @@ func (p *Provisioner) Up(ctx context.Context, runID string) (*State, error) {
 		return n, nil
 	}
 
-	p.Logf("[%s] creating server 1/%d", runID, nodeCount)
+	p.Logf("[%s] creating server 1/%d", runID, nodes)
 	first, err := createNode(1, "")
 	if err != nil {
 		return st, err
@@ -231,11 +249,13 @@ func (p *Provisioner) Up(ctx context.Context, runID string) (*State, error) {
 	st.Nodes = append(st.Nodes, first)
 	_ = st.Save()
 
-	p.Logf("[%s] creating servers 2-%d (join %s)", runID, nodeCount, first.PrivateIP)
 	var wg sync.WaitGroup
-	results := make([]Node, nodeCount-1)
-	errs := make([]error, nodeCount-1)
-	for i := 2; i <= nodeCount; i++ {
+	results := make([]Node, nodes-1)
+	errs := make([]error, nodes-1)
+	if nodes > 1 {
+		p.Logf("[%s] creating servers 2-%d (join %s)", runID, nodes, first.PrivateIP)
+	}
+	for i := 2; i <= nodes; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -251,39 +271,9 @@ func (p *Provisioner) Up(ctx context.Context, runID string) (*State, error) {
 	}
 	_ = st.Save()
 
-	p.Logf("[%s] creating load balancer", runID)
-	svc := func(listen, dest int) hcloud.LoadBalancerCreateOptsService {
-		return hcloud.LoadBalancerCreateOptsService{
-			Protocol: hcloud.LoadBalancerServiceProtocolTCP, ListenPort: hcloud.Ptr(listen), DestinationPort: hcloud.Ptr(dest),
-			HealthCheck: &hcloud.LoadBalancerCreateOptsServiceHealthCheck{
-				Protocol: hcloud.LoadBalancerServiceProtocolTCP, Port: hcloud.Ptr(dest),
-				Interval: hcloud.Ptr(10 * time.Second), Timeout: hcloud.Ptr(5 * time.Second), Retries: hcloud.Ptr(3),
-			},
-		}
+	if err := p.createLB(ctx, st, name, runID, base, network); err != nil {
+		return st, err
 	}
-	lbRes, _, err := p.HC.LoadBalancer.Create(ctx, hcloud.LoadBalancerCreateOpts{
-		Name: name, LoadBalancerType: &hcloud.LoadBalancerType{Name: c.LBType},
-		Location: &hcloud.Location{Name: c.Location}, Labels: base, Network: network,
-		PublicInterface: hcloud.Ptr(true),
-		Targets: []hcloud.LoadBalancerCreateOptsTarget{{
-			Type:          hcloud.LoadBalancerTargetTypeLabelSelector,
-			LabelSelector: hcloud.LoadBalancerCreateOptsTargetLabelSelector{Selector: labels.Selector(runID) + "," + labels.Role + "=server"},
-			UsePrivateIP:  hcloud.Ptr(true),
-		}},
-		Services: []hcloud.LoadBalancerCreateOptsService{svc(80, NodePortHTTP), svc(443, NodePortHTTPS)},
-	})
-	if err != nil {
-		return st, fmt.Errorf("create load balancer: %w", err)
-	}
-	if err := p.HC.Action.WaitFor(ctx, lbRes.Action); err != nil {
-		return st, fmt.Errorf("wait load balancer: %w", err)
-	}
-	lb, _, err := p.HC.LoadBalancer.GetByID(ctx, lbRes.LoadBalancer.ID)
-	if err != nil || lb == nil {
-		return st, fmt.Errorf("get load balancer: %v", err)
-	}
-	st.LBIP = lb.PublicNet.IPv4.IP.String()
-	_ = st.Save()
 
 	p.Logf("[%s] creating DNS *.%s -> %s", runID, st.Domain, st.LBIP)
 	zoneID, err := p.DNS.ZoneID(ctx, c.DNSZone)
@@ -309,6 +299,48 @@ func (p *Provisioner) Up(ctx context.Context, runID string) (*State, error) {
 		return st, fmt.Errorf("rotate k3s token: %w", err)
 	}
 	return st, nil
+}
+
+// createLB creates the load balancer for 3-node installs. 1-node installs point DNS at the node.
+func (p *Provisioner) createLB(ctx context.Context, st *State, name, runID string, base map[string]string, network *hcloud.Network) error {
+	if st.Size == 1 {
+		st.LBIP = st.Nodes[0].PublicIP
+		return st.Save()
+	}
+	c := p.Cfg
+	p.Logf("[%s] creating load balancer", runID)
+	svc := func(listen, dest int) hcloud.LoadBalancerCreateOptsService {
+		return hcloud.LoadBalancerCreateOptsService{
+			Protocol: hcloud.LoadBalancerServiceProtocolTCP, ListenPort: hcloud.Ptr(listen), DestinationPort: hcloud.Ptr(dest),
+			HealthCheck: &hcloud.LoadBalancerCreateOptsServiceHealthCheck{
+				Protocol: hcloud.LoadBalancerServiceProtocolTCP, Port: hcloud.Ptr(dest),
+				Interval: hcloud.Ptr(10 * time.Second), Timeout: hcloud.Ptr(5 * time.Second), Retries: hcloud.Ptr(3),
+			},
+		}
+	}
+	lbRes, _, err := p.HC.LoadBalancer.Create(ctx, hcloud.LoadBalancerCreateOpts{
+		Name: name, LoadBalancerType: &hcloud.LoadBalancerType{Name: c.LBType},
+		Location: &hcloud.Location{Name: c.Location}, Labels: base, Network: network,
+		PublicInterface: hcloud.Ptr(true),
+		Targets: []hcloud.LoadBalancerCreateOptsTarget{{
+			Type:          hcloud.LoadBalancerTargetTypeLabelSelector,
+			LabelSelector: hcloud.LoadBalancerCreateOptsTargetLabelSelector{Selector: labels.Selector(runID) + "," + labels.Role + "=server"},
+			UsePrivateIP:  hcloud.Ptr(true),
+		}},
+		Services: []hcloud.LoadBalancerCreateOptsService{svc(80, NodePortHTTP), svc(443, NodePortHTTPS)},
+	})
+	if err != nil {
+		return fmt.Errorf("create load balancer: %w", err)
+	}
+	if err := p.HC.Action.WaitFor(ctx, lbRes.Action); err != nil {
+		return fmt.Errorf("wait load balancer: %w", err)
+	}
+	lb, _, err := p.HC.LoadBalancer.GetByID(ctx, lbRes.LoadBalancer.ID)
+	if err != nil || lb == nil {
+		return fmt.Errorf("get load balancer: %v", err)
+	}
+	st.LBIP = lb.PublicNet.IPv4.IP.String()
+	return st.Save()
 }
 
 // rotateToken replaces the k3s join token that was delivered in user data, so the
@@ -486,7 +518,7 @@ func (p *Provisioner) Inventory(ctx context.Context, selector string) ([]Resourc
 	if err != nil {
 		return nil, err
 	}
-	recs, err := p.DNS.ListUnder(ctx, zoneID, p.Cfg.TestDomain)
+	recs, err := p.DNS.ListUnder(ctx, zoneID, p.Cfg.DNSScope())
 	if err != nil {
 		return nil, err
 	}
@@ -506,7 +538,7 @@ func (p *Provisioner) Inventory(ctx context.Context, selector string) ([]Resourc
 			if wantRun != "" && !strings.Contains(r.Name, "."+wantRun+".") {
 				continue
 			}
-			l = map[string]string{labels.RunID: runFromName(r.Name, p.Cfg.TestDomain)}
+			l = map[string]string{labels.RunID: runFromName(r.Name, p.Cfg.DNSScope())}
 			if time.Since(r.CreatedOn) > 2*time.Hour {
 				l[labels.ExpiresAt] = "0"
 			} else {

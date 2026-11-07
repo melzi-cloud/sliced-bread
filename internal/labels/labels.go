@@ -22,8 +22,19 @@ func For(runID, owner string, expires time.Time) map[string]string {
 	return map[string]string{
 		RunID:     runID,
 		Owner:     owner,
-		ExpiresAt: strconv.FormatInt(expires.Unix(), 10),
+		ExpiresAt: ExpiryValue(expires),
 	}
+}
+
+// Never marks resources of a real install that must never be reaped.
+const Never = "never"
+
+// ExpiryValue renders an expiry time as a label value; the zero time means Never.
+func ExpiryValue(t time.Time) string {
+	if t.IsZero() {
+		return Never
+	}
+	return strconv.FormatInt(t.Unix(), 10)
 }
 
 // With returns a copy of base with extra labels added.
@@ -45,6 +56,9 @@ func Expired(l map[string]string, now time.Time) bool {
 	v, ok := l[ExpiresAt]
 	if !ok {
 		return l[RunID] != ""
+	}
+	if v == Never {
+		return false
 	}
 	ts, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
@@ -78,7 +92,7 @@ func ValidRunID(s string) bool { return runIDPattern.MatchString(s) }
 
 // DNSComment encodes run labels into a Cloudflare record comment.
 func DNSComment(runID string, expires time.Time) string {
-	return fmt.Sprintf("%s=%s %s=%d", RunID, runID, ExpiresAt, expires.Unix())
+	return fmt.Sprintf("%s=%s %s=%s", RunID, runID, ExpiresAt, ExpiryValue(expires))
 }
 
 // ParseDNSComment extracts labels from a record comment written by DNSComment.

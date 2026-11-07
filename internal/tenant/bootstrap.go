@@ -27,21 +27,29 @@ func (st *State) Kubectl(ctx context.Context, args string, stdin []byte) ([]byte
 
 // Params returns addon template parameters for this tenant.
 func (p *Provisioner) Params(st *State) AddonParams {
-	return AddonParams{
+	ap := AddonParams{
 		RunID: st.RunID, Owner: st.Owner, ExpiresAt: strconv.FormatInt(st.ExpiresAt.Unix(), 10),
 		Location: st.Location, DNSZone: p.Cfg.DNSZone, WildcardDomain: "*." + st.Domain,
 		ACMEServer: p.Cfg.ACMEServer, CertManagerVersion: p.Cfg.CertManagerVersion, HcloudCSIVersion: p.Cfg.HcloudCSIVersion,
 	}
+	if f := p.Cfg.Fallback; f != nil {
+		ap.FallbackServer, ap.FallbackKeyID = f.Server, f.KeyID
+	}
+	return ap
 }
 
 // InstallAddons installs secrets, cert-manager, the CSI driver, and the tenant wildcard certificate.
 func (p *Provisioner) InstallAddons(ctx context.Context, st *State) error {
 	params := p.Params(st)
 	p.Logf("[%s] installing secrets and charts", st.RunID)
-	if _, err := st.Kubectl(ctx, "create namespace cert-manager --dry-run=client -o yaml | k3s kubectl apply -f -", nil); err != nil {
+	if _, err := st.Kubectl(ctx, "create namespace cert-manager --dry-run=client -o yaml | k3s kubectl apply -f - && k3s kubectl create namespace sb-system --dry-run=client -o yaml | k3s kubectl apply -f -", nil); err != nil {
 		return fmt.Errorf("namespace: %w", err)
 	}
-	secrets, err := SecretsManifest(SecretsInput{HcloudToken: p.Cfg.HcloudToken, CloudflareToken: p.Cfg.CloudflareToken})
+	in := SecretsInput{HcloudToken: p.Cfg.HcloudToken, CloudflareToken: p.Cfg.CloudflareToken}
+	if p.Cfg.Fallback != nil {
+		in.FallbackHMAC = p.Cfg.Fallback.HMAC
+	}
+	secrets, err := SecretsManifest(in)
 	if err != nil {
 		return err
 	}
@@ -80,10 +88,23 @@ func (p *Provisioner) InstallAddons(ctx context.Context, st *State) error {
 	if err != nil {
 		return fmt.Errorf("apply TLS manifests: %w", err)
 	}
-	err = poll(ctx, 12*time.Minute, 10*time.Second, func(ctx context.Context) (bool, error) {
-		_, err := st.Kubectl(ctx, "-n kube-system wait --for=condition=Ready certificate/tenant-wildcard --timeout=20s", nil)
-		return err == nil, nil
-	})
+	certReady := func(timeout time.Duration) error {
+		return poll(ctx, timeout, 10*time.Second, func(ctx context.Context) (bool, error) {
+			_, err := st.Kubectl(ctx, "-n kube-system wait --for=condition=Ready certificate/tenant-wildcard --timeout=20s", nil)
+			return err == nil, nil
+		})
+	}
+	first := 12 * time.Minute
+	if params.FallbackServer != "" {
+		first = 8 * time.Minute
+	}
+	if err = certReady(first); err != nil && params.FallbackServer != "" {
+		p.Logf("[%s] first issuer did not issue in %s; switching to the fallback issuer", st.RunID, first)
+		if _, perr := st.Kubectl(ctx, `-n kube-system patch certificate tenant-wildcard --type merge -p '{"spec":{"issuerRef":{"name":"`+FallbackIssuerName+`"}}}'`, nil); perr != nil {
+			return fmt.Errorf("switch to fallback issuer: %w", perr)
+		}
+		err = certReady(12 * time.Minute)
+	}
 	if err != nil {
 		return fmt.Errorf("wildcard certificate not issued: %w", err)
 	}

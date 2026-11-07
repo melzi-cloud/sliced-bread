@@ -20,8 +20,10 @@ test:
 	go vet ./...
 	go test ./...
 
+# Release-style build: sb with the linux/amd64 sb-control embedded.
 build:
-	go build -o bin/sb ./cmd/sb
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o internal/controlbin/payload/sb-control ./cmd/sb-control
+	go build -trimpath -o bin/sb ./cmd/sb
 
 # Runs the reaper first so leftovers from crashed runs never pile up.
 e2e-hetzner:

@@ -148,3 +148,47 @@ func (c *Client) ListUnder(ctx context.Context, zoneID, suffix string) ([]Record
 		}
 	}
 }
+
+// Zone is a Cloudflare zone visible to the token.
+type Zone struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Zones lists every zone the token can see.
+func (c *Client) Zones(ctx context.Context) ([]Zone, error) {
+	var all []Zone
+	for page := 1; ; page++ {
+		var zs []Zone
+		env, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/zones?per_page=50&page=%d", page), nil, &zs)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, zs...)
+		if env.ResultInfo.TotalPages == 0 || page >= env.ResultInfo.TotalPages {
+			return all, nil
+		}
+	}
+}
+
+// ZoneFor finds the most specific zone that contains domain.
+func (c *Client) ZoneFor(ctx context.Context, domain string) (Zone, error) {
+	zs, err := c.Zones(ctx)
+	if err != nil {
+		return Zone{}, err
+	}
+	var best Zone
+	for _, z := range zs {
+		if (domain == z.Name || strings.HasSuffix(domain, "."+z.Name)) && len(z.Name) > len(best.Name) {
+			best = z
+		}
+	}
+	if best.ID == "" {
+		names := make([]string, 0, len(zs))
+		for _, z := range zs {
+			names = append(names, z.Name)
+		}
+		return Zone{}, fmt.Errorf("no Cloudflare zone visible to this token contains %s (token sees: %s)", domain, strings.Join(names, ", "))
+	}
+	return best, nil
+}

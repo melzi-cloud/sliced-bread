@@ -10,3 +10,5 @@ dist/
 test/artifacts/
 .sb/
 bin/
+
+internal/controlbin/payload/sb-control

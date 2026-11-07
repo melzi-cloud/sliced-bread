@@ -137,8 +137,8 @@ func (a *App) Validate() error {
 // Namespace returns the Kubernetes namespace for an app.
 func Namespace(name string) string { return "app-" + name }
 
-// Host returns the public hostname for an app in a tenant domain.
-func Host(name, domain string) string { return name + "." + domain }
+// Host returns the public hostname for an app of a self-hosted install.
+func Host(name, domain string) string { return Hosts{Domain: domain}.App(name) }
 
 // EnvKeys returns sorted env keys, including secret ones.
 func (a *App) EnvKeys() []string {

@@ -247,3 +247,19 @@ func TestNonRootAppsKeepNoCapabilities(t *testing.T) {
 		}
 	}
 }
+
+func TestHosts(t *testing.T) {
+	h := Hosts{Domain: "apps.example.com"}
+	if h.App("crm") != "crm.apps.example.com" || h.Auth() != "auth.apps.example.com" || h.API() != "api.apps.example.com" {
+		t.Fatal("self-hosted format")
+	}
+	hh := Hosts{Mode: ModeHosted, Domain: "slicedbread.cloud", Tenant: "acme"}
+	if hh.App("crm") != "crm-acme.slicedbread.cloud" {
+		t.Fatalf("hosted format: %s", hh.App("crm"))
+	}
+	long := Hosts{Mode: ModeHosted, Domain: "x.io", Tenant: strings.Repeat("t", 40)}.App(strings.Repeat("a", 30))
+	label := strings.TrimSuffix(long, ".x.io")
+	if len(label) > 63 || Label(strings.Repeat("a", 30)+"-"+strings.Repeat("t", 40)) != label {
+		t.Fatalf("long label %q (%d)", label, len(label))
+	}
+}

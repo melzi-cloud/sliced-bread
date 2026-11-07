@@ -65,7 +65,7 @@ func (s *Server) apiDeviceStart(w http.ResponseWriter, r *http.Request) {
 	s.devices.grants[g.Poll] = g
 	writeJSON(w, 201, map[string]any{
 		"code": g.Code, "poll": g.Poll, "expiresIn": 600,
-		"verifyUrl": "https://auth." + s.cfg.Domain + "/device?code=" + g.Code,
+		"verifyUrl": "https://" + s.hosts().Auth() + "/device?code=" + g.Code,
 	})
 }
 

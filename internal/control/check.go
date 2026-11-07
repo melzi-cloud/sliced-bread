@@ -8,8 +8,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/melzi-cloud/sliced-bread/internal/apps"
 )
 
 var titleRE = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
@@ -45,7 +43,7 @@ func (s *Server) apiCheck(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, internalURL(a)+path, nil)
-	req.Host = apps.Host(a.Name, s.cfg.Domain)
+	req.Host = s.hosts().App(a.Name)
 	req.Header.Set("Accept", "text/html,*/*")
 	req.Header.Set("X-Sb-User", "sb-check")
 	// A fresh connection per check: a kept-alive connection would stay pinned to a pod

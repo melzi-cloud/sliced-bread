@@ -6,6 +6,7 @@ require (
 	github.com/google/go-containerregistry v0.22.1
 	github.com/hetznercloud/hcloud-go/v2 v2.53.0
 	golang.org/x/crypto v0.58.0
+	golang.org/x/term v0.47.0
 )
 
 require (

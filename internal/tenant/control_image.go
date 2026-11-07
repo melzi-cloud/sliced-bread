@@ -22,24 +22,38 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
+
+	"github.com/melzi-cloud/sliced-bread/internal/controlbin"
 )
 
 const controlBase = "gcr.io/distroless/static-debian12:nonroot"
 
-// BuildControlImage cross-compiles sb-control and packs it into a docker-format
-// image tarball. Returns the image reference and the tarball bytes.
-func BuildControlImage(ctx context.Context, repoRoot string) (string, []byte, error) {
+// ControlBinary returns the linux/amd64 sb-control binary: the one embedded in this
+// sb build, or a fresh cross-compile when running from the repository.
+func ControlBinary(ctx context.Context, repoRoot string) ([]byte, error) {
+	if repoRoot == "" {
+		if b, ok := controlbin.Binary(); ok {
+			return b, nil
+		}
+		return nil, fmt.Errorf("this sb build has no embedded sb-control; build it with `make build` or run from the repository")
+	}
 	out := filepath.Join(repoRoot, ".sb", "build", "sb-control")
 	if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-ldflags=-s -w", "-o", out, "./cmd/sb-control")
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
 	if b, err := cmd.CombinedOutput(); err != nil {
-		return "", nil, fmt.Errorf("go build sb-control: %v\n%s", err, b)
+		return nil, fmt.Errorf("go build sb-control: %v\n%s", err, b)
 	}
-	bin, err := os.ReadFile(out)
+	return os.ReadFile(out)
+}
+
+// BuildControlImage packs the sb-control binary into a docker-format image tarball.
+// repoRoot "" uses the binary embedded in this sb build.
+func BuildControlImage(ctx context.Context, repoRoot string) (string, []byte, error) {
+	bin, err := ControlBinary(ctx, repoRoot)
 	if err != nil {
 		return "", nil, err
 	}

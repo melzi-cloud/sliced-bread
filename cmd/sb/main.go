@@ -34,6 +34,18 @@ Secrets come from the environment. Run through hack/secrets-env.`
 
 func main() {
 	args := os.Args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "init":
+			os.Exit(handleExit(runInit(args[1:])))
+		case "destroy":
+			os.Exit(handleExit(runDestroy(args[1:])))
+		case "installs":
+			os.Exit(handleExit(runInstalls()))
+		case "upgrade":
+			os.Exit(handleExit(runUpgrade(args[1:])))
+		}
+	}
 	if len(args) > 0 && args[0] == "dev" {
 		if err := run(args); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)

@@ -15,7 +15,7 @@ func nodeConfig(t *testing.T, init bool) NodeConfig {
 	}
 	return NodeConfig{
 		Init: init, JoinAddr: "10.0.1.2", Token: "abc123", K3sVersion: "v1.37.2+k3s1",
-		HostKeyPriv: string(hk.PrivatePEM), HostKeyPub: hk.AuthorizedKey, Manifests: ServerManifests(),
+		HostKeyPriv: string(hk.PrivatePEM), HostKeyPub: hk.AuthorizedKey, Manifests: ServerManifests(3),
 	}
 }
 
@@ -104,6 +104,41 @@ func TestRunFromName(t *testing.T) {
 	for name, want := range cases {
 		if got := runFromName(name, "test.slicedbread.dev"); got != want {
 			t.Errorf("runFromName(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestSingleNodeUserData(t *testing.T) {
+	c := nodeConfig(t, true)
+	c.SingleNode, c.Manifests = true, ServerManifests(1)
+	ud, err := RenderUserData(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(ud, "--disable servicelb") || !strings.Contains(ud, "type: LoadBalancer") {
+		t.Fatal("single node keeps servicelb and a LoadBalancer Traefik service")
+	}
+	if ud3, _ := RenderUserData(nodeConfig(t, true)); !strings.Contains(ud3, "--disable servicelb") {
+		t.Fatal("3 nodes disable servicelb")
+	}
+}
+
+func TestFallbackIssuer(t *testing.T) {
+	p := AddonParams{DNSZone: "example.com", WildcardDomain: "*.apps.example.com", ACMEServer: "https://le", FallbackServer: "https://acme.zerossl.com/v2/DV90", FallbackKeyID: "kid1"}
+	m, _ := TLSManifest(p)
+	for _, want := range []string{"name: fallback", "externalAccountBinding:", `keyID: "kid1"`, "name: fallback-eab"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	p.FallbackServer = ""
+	if m, _ := TLSManifest(p); strings.Contains(m, "externalAccountBinding") {
+		t.Fatal("no fallback issuer without EAB")
+	}
+	sec, _ := SecretsManifest(SecretsInput{HcloudToken: "h", CloudflareToken: "c", FallbackHMAC: "x"})
+	for _, want := range []string{"name: fallback-eab", "name: sb-provider", `hcloud-token: "h"`} {
+		if !strings.Contains(string(sec), want) {
+			t.Errorf("secrets missing %q", want)
 		}
 	}
 }

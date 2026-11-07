@@ -87,7 +87,7 @@ func (s *Server) apiWhoami(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"scope": scopeOf(r), "domain": s.cfg.Domain, "team": s.auth.Emails(),
 		"wallAdmits": "signed-in team members listed in team",
-		"dashboard":  "https://auth." + s.cfg.Domain, "approvals": "https://auth." + s.cfg.Domain + "/approvals",
+		"dashboard":  "https://" + s.hosts().Auth(), "approvals": "https://" + s.hosts().Auth() + "/approvals",
 		"appUrlPattern": "https://<app>." + s.cfg.Domain,
 	})
 }
@@ -197,7 +197,7 @@ func (s *Server) approvalResponse(w http.ResponseWriter, ap *Approval) {
 		"approval":   ap.ID,
 		"state":      "pending",
 		"summary":    ap.Summary,
-		"approveUrl": "https://auth." + s.cfg.Domain + "/approvals",
+		"approveUrl": "https://" + s.hosts().Auth() + "/approvals",
 		"hint":       "A human must approve this. Give the user the approve URL. Then wait with: sb approvals --wait " + ap.ID,
 	})
 }
@@ -629,7 +629,7 @@ func (s *Server) apiListApprovals(w http.ResponseWriter, r *http.Request) {
 	for _, ap := range list {
 		out = append(out, view{ap.ID, ap.App, ap.Kind, ap.Summary, ap.RequestedAt, ap.RequestedBy, ap.State, ap.Result})
 	}
-	writeJSON(w, 200, map[string]any{"approvals": out, "approveUrl": "https://auth." + s.cfg.Domain + "/approvals"})
+	writeJSON(w, 200, map[string]any{"approvals": out, "approveUrl": "https://" + s.hosts().Auth() + "/approvals"})
 }
 
 func (s *Server) decide(ctx context.Context, id, decision string) (*Approval, error) {
