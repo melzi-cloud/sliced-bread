@@ -50,7 +50,7 @@ Hetzner prices in nbg1 including VAT, checked 2026-11-06 (cx23: 2 vCPU, 4 GB RAM
 | Size | What you get | About |
 |---|---|---|
 | `--size 1` | 1 server, ports 80/443 open on it. App data on Hetzner volumes (they survive the server, but nothing moves them). No high availability: if the server fails, apps are down until it is back or restored from backup, and the nightly OS reboot takes apps down for a minute or two. | EUR 7/month |
-| `--size 3` | 3 servers in a spread placement group (different physical hosts), a load balancer, embedded etcd that survives losing one server, two copies of the login wall. A dead server is replaced automatically (in the node-loss test, apps were serving again within 5 minutes and a new server had joined after about 3); OS reboots happen one server at a time without downtime for apps without a volume. | EUR 29/month |
+| `--size 3` | 3 servers in a spread placement group (different physical hosts), a load balancer, embedded etcd that survives losing one server, two copies of the login wall. A dead server is replaced automatically (in the node-loss test the login wall was back after 21 seconds, apps with data within about 3.5 minutes, and a new server had joined after about 2.5); OS reboots happen one server at a time without downtime for apps without a volume. | EUR 29/month |
 | per app with data | each volume or database is a 10 GB Hetzner volume | EUR 0.77/month |
 
 Backup storage is billed by your S3 provider. Restic deduplicates and compresses, so small apps use little space.
@@ -80,16 +80,16 @@ Backup storage is billed by your S3 provider. Restic deduplicates and compresses
 
 ## Recovery, measured
 
-`make e2e-node-loss` powers off, through the Hetzner API, the server running Vaultwarden on a 3-server install with Vaultwarden and Umami in use, and measures until each app serves again. In the latest run (2026-11-06) that server also ran Umami's database, the database operator and one of the two control-plane replicas:
+`make e2e-node-loss` powers off, through the Hetzner API, the server running Vaultwarden on a 3-server install with Vaultwarden and Umami in use. Each check runs on its own every second (Umami every 5 seconds); "back" is the start of the final unbroken run of successes. In the latest run (2026-11-07) that server also ran Umami's database, the database operator, one of the two control-plane replicas and the active guard:
 
 | | Back after |
 |---|---|
-| Dashboard and login wall | 2 min 3 s |
-| Replacement server joined | 3 min 9 s |
-| Vaultwarden | 4 min 5 s |
-| Umami (through its database) | 4 min 59 s |
+| Dashboard and login wall | 21 s |
+| Replacement server joined | 2 min 32 s |
+| Vaultwarden | 2 min 58 s |
+| Umami (through its database) | 3 min 24 s |
 
-No data was lost, including a Vaultwarden account created seconds before the power-off. Most of the time is spent moving Hetzner volumes to another server.
+No data was lost, including a Vaultwarden account created seconds before the power-off. The login wall comes back as soon as the standby guard has fenced the dead server (D-029). Apps with a volume take longer because Hetzner moves the volume only once the dead server is deleted.
 
 ## Docs
 

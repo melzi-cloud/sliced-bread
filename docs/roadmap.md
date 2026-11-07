@@ -23,7 +23,7 @@ M6 is required before any real data, including our own Vaultwarden, moves onto t
 
 ## Acceptance tests
 
-1. Hard-kill a node: every app is back within the recovery target with no data loss. **Done 2026-11-06** (`make e2e-node-loss`: apps back within 5 minutes, replacement server joined after about 3, no data loss; see README).
+1. Hard-kill a node: every app is back within the recovery target with no data loss. **Done 2026-11-06** (`make e2e-node-loss`: login wall back after 21 seconds, apps with data within about 3.5 minutes, replacement server joined after about 2.5, no data loss; see README).
 2. Delete an app: one command brings it back from backup (`sb restore <app> --recreate`). **Done 2026-11-06.** A whole install is rebuilt into a new one from its bucket (`sb init` with `SB_BACKUP_PASSWORD`, then "Recreate all" in the dashboard). **Done 2026-11-06.**
 3. Corrupt a Postgres table: point-in-time recovery brings it back.
 4. Patch day: OS updates and reboots happen with no manual steps and no user-visible downtime. **Done 2026-11-06 for apps without a volume and the login wall** (three servers rebooted one at a time, probes every 2 seconds saw no failure for them); apps with a volume pause for about a minute while it moves, until volumes or databases are replicated.
