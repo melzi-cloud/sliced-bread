@@ -465,3 +465,22 @@ func expiryLine(st *tenant.State) string {
 	}
 	return "\n  expires:     " + st.ExpiresAt.UTC().Format(time.RFC3339) + " (test install: everything is deleted then)"
 }
+
+// repoRoot finds the source checkout when sb runs from one (to build sb-control when the
+// binary has none embedded).
+func repoRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", errors.New("not inside the SlicedBread repository")
+		}
+		dir = parent
+	}
+}

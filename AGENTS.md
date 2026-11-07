@@ -6,7 +6,7 @@ Instructions for coding agents working on SlicedBread. Read [docs/architecture.m
 
 1. Make a change.
 2. `make test` (vet + unit tests). Must pass before anything else.
-3. If you touched provisioning, networking, storage, TLS or anything under `internal/tenant` or `internal/smoke`: `make e2e-hetzner`. It creates a real 3-node tenant, checks it, and destroys it. About 15 to 25 minutes, a few cents.
+3. If you touched provisioning, networking, storage, TLS or anything under `internal/tenant` or `hack/smoke`: `make e2e-hetzner`. It creates a real 3-node tenant, checks it, and destroys it. About 15 to 25 minutes, a few cents.
 4. On failure, read `test/artifacts/<run-id>/`: `state.json`, `events.txt`, `pods.txt`, `certs.txt`, `helm-jobs.log`, and `<node>.log` (bootstrap, cloud-init and k3s journal per node). Fix the cause, then rerun.
 5. `make check` before committing (tests plus a scan for secrets in tracked files).
 6. Commit with a short message describing the change. Push to `origin main` unless told to use a branch.
@@ -29,7 +29,7 @@ Instructions for coding agents working on SlicedBread. Read [docs/architecture.m
 - **Never print, log, commit or paste secrets.** They come from `hack/secrets-env`. Pass secrets to remote commands over stdin only, never in a command line. Do not run `env`, `printenv` or `set` in a shell that has secrets loaded.
 - **Development credentials only.** The Hetzner project is `sb-dev`. Never use production credentials, even if you find them.
 - **DNS:** only create records under `test.slicedbread.dev`. The Cloudflare token can only see the `slicedbread.dev` zone.
-- **Certificates:** smoke tests use Let's Encrypt staging. Only `sb dev prototype up` uses production certificates (one wildcard per tenant).
+- **Certificates:** smoke tests use Let's Encrypt staging. Only `sb-dev prototype up` uses production certificates (one wildcard per tenant).
 - **Every cloud resource must carry** `sb/run-id`, `sb/owner` and `sb/expires-at` labels (DNS records: the same in the record comment). Code that creates an unlabelled resource is a bug.
 - **Always clean up.** Smoke runs destroy what they create, success or failure. `make reaper` deletes expired leftovers. It runs automatically before `make e2e-hetzner` and every 15 minutes on the Mac mini (`make reaper-status`; after a reboot someone must run `make reaper-unlock`). Check `make tenant-list` if a run crashed.
 - **Budget:** keep test spend low. Do not raise server types, node counts or TTLs without a reason written in the commit message.
@@ -40,7 +40,7 @@ Instructions for coding agents working on SlicedBread. Read [docs/architecture.m
 ## Layout
 
 ```
-cmd/sb/             CLI: user commands (deploy, wait, logs, env, action...) and `sb dev ...`
+cmd/sb/             CLI for users: sb init and app commands (deploy, wait, logs, env, action...)
 cmd/sb-control/     control plane that runs in each tenant
 internal/apps       app model, templates, rendering to Kubernetes objects
 internal/control    API, login wall, approvals, reconciler, builds, uploads, template hooks
@@ -51,7 +51,7 @@ internal/labels     resource labels, run ids, expiry
 internal/dns        minimal Cloudflare client
 internal/sshx       SSH with pinned host keys
 internal/tenant     Hetzner provisioning, cloud-init, addons, inventory, teardown, reaper
-internal/smoke      L2 smoke test logic
 test/e2e/hetzner    go test entry point for L2 (build tag e2e)
-hack/               secrets-env, scan-secrets, reaper-schedule and reaper-agent (scheduled reaper)
+hack/               developer tooling, not shipped to users: sb-dev (test installs, reaper, prototype, control push),
+                    smoke (L2 smoke test logic), secrets-env, scan-secrets, reaper-schedule, reaper-agent
 ```

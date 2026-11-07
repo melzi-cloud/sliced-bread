@@ -60,10 +60,10 @@ Repos and uploaded directories are built by a Job (clone or fetch, `railpack pre
 `sb deploy --dir` uploads a gzip tarball (dependencies and build output skipped) that sb-control stores on its volume. Build jobs fetch it over an HMAC-signed in-cluster URL. This lets an agent ship local edits without pushing to git.
 
 ## D-019 Prototype tenants use production Let's Encrypt (2026-11-06)
-`sb dev prototype up` issues trusted certificates so browsers and Bitwarden clients work. Smoke tests stay on staging.
+`sb-dev prototype up` issues trusted certificates so browsers and Bitwarden clients work. Smoke tests stay on staging.
 
 ## D-020 sb-control image is built locally and imported over SSH (2026-11-06)
-go-containerregistry packs the static binary onto a distroless base, and the tarball is imported into containerd on each node. No external registry or extra credentials. `sb dev control push <run-id>` rolls out a new build in about a minute.
+go-containerregistry packs the static binary onto a distroless base, and the tarball is imported into containerd on each node. No external registry or extra credentials. `sb-dev control push <run-id>` rolls out a new build in about a minute.
 
 ## D-021 Self-hosted mode is the first release (2026-11-06)
 Users run `sb init` from their laptop with their own Hetzner and Cloudflare tokens and their own domain, choosing 1 node (cheap, no HA) or 3 nodes (HA). The control plane runs inside their cluster. Hosted-by-us starts as a waitlist; bring-your-own-servers comes later. Details in [hosting-modes.md](hosting-modes.md).

@@ -104,9 +104,7 @@ How it works:
 
 ## Repository layout
 
-Current layout is described in [AGENTS.md](../AGENTS.md). Planned additions: `cmd/sb-control`, `cmd/sb-agent`, `cmd/sb-authproxy`, `cmd/sb-mcp`, `templates/`, `test/e2e/local`, `test/acceptance`.
-
-Language: Go. Pinned versions live in `internal/config` (k3s, cert-manager, hcloud-csi). Main dependencies: hcloud-go, golang.org/x/crypto/ssh.
+Current layout is described in [AGENTS.md](../AGENTS.md). Two binaries ship to users: `sb` (`cmd/sb`, the CLI) and `sb-control` (`cmd/sb-control`, which runs in each install). Everything only developers need is under `hack/`: the `sb-dev` binary (`hack/sb-dev`: test installs, prototypes, pushing sb-control to a test install, the reaper, the smoke test), the smoke test logic (`hack/smoke`), and scripts (`secrets-env`, `scan-secrets`, the scheduled reaper). It stays in the repository so anyone can reproduce our tests and debug an install the way we do. The Makefile targets run `sb-dev` for you; `make build` also builds `bin/sb-dev`.
 
 ## Order of work
 

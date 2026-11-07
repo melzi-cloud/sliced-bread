@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/melzi-cloud/sliced-bread/internal/config"
-	"github.com/melzi-cloud/sliced-bread/internal/smoke"
+	"github.com/melzi-cloud/sliced-bread/hack/smoke"
 	"github.com/melzi-cloud/sliced-bread/internal/tenant"
 )
 

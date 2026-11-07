@@ -6,7 +6,7 @@
 #   hack/reaper-schedule unlock      unlock the dev keychain in the agent's launchd session
 #   hack/reaper-schedule status      agent state and the end of the log
 #
-# The agent runs `sb dev reap` every 15 minutes in the per-user background launchd
+# The agent runs `sb-dev reap` every 15 minutes in the per-user background launchd
 # domain (user/<uid>). Notes:
 #   - The install directory is outside ~/Documents: macOS privacy protection blocks
 #     launchd jobs from reading files under ~/Documents, where checkouts live.
@@ -56,8 +56,8 @@ install_agent() {
   [ -f "$ROOT/dev.env" ] || die "$ROOT/dev.env is missing"
   mkdir -p "$DEST/bin" "$DEST/hack" "$(dirname "$PLIST")" "$(dirname "$LOG")"
   echo "building sb into $DEST/bin"
-  (cd "$ROOT" && go build -trimpath -o "$DEST/bin/sb.new" ./cmd/sb)
-  mv -f "$DEST/bin/sb.new" "$DEST/bin/sb"
+  (cd "$ROOT" && go build -trimpath -o "$DEST/bin/sb-dev.new" ./hack/sb-dev)
+  mv -f "$DEST/bin/sb-dev.new" "$DEST/bin/sb-dev"; rm -f "$DEST/bin/sb"
   install -m 755 "$ROOT/hack/secrets-env" "$ROOT/hack/reaper-agent" "$DEST/hack/"
   install -m 600 "$ROOT/dev.env" "$DEST/dev.env"
   cat >"$PLIST" <<EOF

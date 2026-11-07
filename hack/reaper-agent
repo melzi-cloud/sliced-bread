@@ -5,7 +5,7 @@
 #   reaper-agent run      one reaper run; appends to the log; exit status is the run's
 #   reaper-agent unlock   unlock the keychain in this launchd session, password on stdin
 #
-# Layout of the install directory: bin/sb, hack/secrets-env, hack/reaper-agent, dev.env.
+# Layout of the install directory: bin/sb-dev, hack/secrets-env, hack/reaper-agent, dev.env.
 # Never prints secrets.
 set -uo pipefail
 
@@ -43,7 +43,7 @@ run)
     log "reaper: finished, exit 3"
     exit 3
   fi
-  "$DIR/hack/secrets-env" "$DIR/bin/sb" dev reap -wait 0 -timeout 30m
+  "$DIR/hack/secrets-env" "$DIR/bin/sb-dev" reap -wait 0 -timeout 30m
   rc=$?
   log "reaper: finished, exit $rc"
   exit "$rc"
