@@ -100,6 +100,15 @@ Approvals (privileged changes requested by agents)
   sb approvals [--app <app>] [--wait <id>] [--timeout 30m]   list (optionally one app), or block until a human decides
   (a human approves or denies in the dashboard: https://auth.<tenant-domain>/approvals)
 
+Admin (done by a human in the dashboard; these commands only print the link)
+  sb approve <id> | sb deny <id>      https://auth.<tenant-domain>/approvals
+  sb backups configure                https://auth.<tenant-domain>/settings (bucket and keys)
+  sb backups password                 https://auth.<tenant-domain>/settings (encryption password)
+  sb export                           https://auth.<tenant-domain>/settings (downloads a .tar.gz of every app's manifests)
+  sb restore --all                    https://auth.<tenant-domain>/settings (restore every app from the bucket)
+  sb members invite|remove|role       https://auth.<tenant-domain>/members
+  sb alerts configure|test            https://auth.<tenant-domain>/settings (webhook)
+
 Output is human-readable; add --json to any command for JSON. Config: $SB_CONFIG or ~/.config/slicedbread/config.json.
 Exit codes: 0 ok; 1 error (failed build, denied or obsolete approval, sb check --contains not found);
 2 usage; 3 waiting for human approval (also when sb approvals --wait times out).`

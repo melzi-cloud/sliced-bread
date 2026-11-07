@@ -76,7 +76,8 @@ When you see exit code 3:
 1. Tell the user what you requested and give them the `approve at:` URL from the output.
 2. Do not try to work around it (for example by redeploying under another name or with another mode). You cannot approve: humans approve in the dashboard, and no CLI token can.
 3. Wait with `sb approvals --wait <id> [--timeout 30m]`. It exits 0 when approved, 1 when denied or obsolete, and 3 if still pending at the timeout. Or stop and report. `sb approvals --app <app>` lists one app's approvals. Once approved, the change applies automatically. `sb status <app>` lists pending approvals for the app.
-4. If the app changes or is deleted before approval, the approval becomes obsolete and must be requested again.
+4. If the app changes or is deleted before approval, the approval becomes obsolete and must be requested again. A redeploy (new code), `sb env` or `sb settings` counts as a change, so finish code and config changes first and request wider access last.
+5. If nobody is watching (for example you run unattended), do not block for long: request, report the approve link, and stop. `sb approvals --wait` is for when the user is at hand.
 
 ### How the wall answers
 
@@ -219,6 +220,10 @@ Secrets come from environment variables, never flags: `HCLOUD_TOKEN`, `CLOUDFLAR
 | `error: app ... already exists` | Use `sb redeploy`, `sb env`, or `sb settings`; deleting needs approval |
 | Exit code 3 | Waiting for a human; see Access modes above |
 | `running` but the page looks wrong | `sb check <app> /` and `sb logs <app>` |
+
+## Secrets the user pastes into the chat
+
+If the user pastes a key or password (S3 keys, API keys) into the conversation, do not pass it to commands you were not asked to run, do not store it in files, and do not repeat it. Where it belongs in the dashboard (backup bucket keys, members), give the link instead, and suggest rotating anything that was pasted. App secrets an app needs (for example a Stripe key) can be set with `sb env set <app> --secrets-stdin` when the user asks you to.
 
 ## Rules
 

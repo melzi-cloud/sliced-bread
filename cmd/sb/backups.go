@@ -59,12 +59,13 @@ func (c *client) runBackupCmd(cmd string, fs *flag.FlagSet, rest []string, jsonO
 		}
 		json.Unmarshal(b, &v)
 		if !v.Configured {
-			fmt.Println("backups: not configured")
+			fmt.Println("backups: not configured (a human sets up the bucket in the dashboard: Settings)")
 			fmt.Println(v.Hint)
 			return true, nil
 		}
 		fmt.Println("target:  ", v.Target)
 		fmt.Println("schedule:", v.Schedule)
+		fmt.Println("encryption password: held by the user and shown only in the dashboard (Settings); agents never see it")
 		for _, a := range v.Apps {
 			fmt.Printf("%s: %s\n", a.Name, a.Summary)
 			if len(pos) == 1 && a.State != nil {

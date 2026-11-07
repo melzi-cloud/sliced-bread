@@ -89,6 +89,8 @@ Secrets (read from the environment, or prompted for on a terminal):
                          (CF_API_TOKEN is also accepted).
   SB_EAB_KID, SB_EAB_HMAC  ZeroSSL external account binding for --fallback-issuer (optional: without them
                          sb init requests one from ZeroSSL with the --email address).
+  SB_BACKUP_PASSWORD     reuse the encryption password of an earlier install (to restore its apps from the
+                         same bucket and prefix after setup; otherwise a new password is generated).
   SB_BACKUP_ACCESS_KEY_ID, SB_BACKUP_SECRET_ACCESS_KEY  S3 keys for --backup-bucket (recommended: a bucket
                          in another location, e.g. Cloudflare R2 or Hetzner Object Storage).
 Test installs: --expire-after 6h labels every resource to be deleted by the SlicedBread reaper after that time.
@@ -251,6 +253,13 @@ func runInit(args []string) error {
 		}
 	}
 	backupLine := "no bucket yet: set one up in the dashboard (Settings). Until then nothing is backed up."
+	passwordNote := `   Save it in your password manager now. Your backups are encrypted with it, and if your
+   servers are ever lost it is the only way to read them. It is not stored on this machine.`
+	if os.Getenv("SB_BACKUP_PASSWORD") != "" {
+		passwordNote = `   This is the password you passed in SB_BACKUP_PASSWORD. To bring back the apps of an earlier
+   install from this bucket: after setup, open Settings in the dashboard and use
+   "Look in the backup repository", then "Recreate all".`
+	}
 	if *bBucket != "" {
 		prefix := *bPrefix
 		if prefix == "" {
@@ -266,8 +275,7 @@ SlicedBread is ready.
 
 2. Backup encryption password:
      %s
-   Save it in your password manager now. Your backups are encrypted with it, and if your
-   servers are ever lost it is the only way to read them. It is not stored on this machine.
+%s
 
   install id:  %s
   apps:        https://<app>.%s
@@ -276,7 +284,7 @@ SlicedBread is ready.
                config go through, making apps public, deleting and restoring wait for your
                approval in the dashboard.%s
   later:       sb setup-link %s (new setup link), sb destroy %s (remove everything)
-`, setupLink, backupPassword, st.RunID, st.Domain, backupLine, cfgPath, expiryLine(st), st.RunID, st.RunID)
+`, setupLink, backupPassword, passwordNote, st.RunID, st.Domain, backupLine, cfgPath, expiryLine(st), st.RunID, st.RunID)
 	if !*yes && term.IsTerminal(int(os.Stdin.Fd())) {
 		fmt.Fprint(os.Stderr, "\nPress Enter once you have saved the backup encryption password. ")
 		bufio.NewReader(os.Stdin).ReadString('\n')
