@@ -11,7 +11,8 @@ What SlicedBread protects against, what it does not, and where the trust boundar
 | App secret values in backups | Every snapshot carries the app's spec and secret values (and uploaded source), so it can recreate the app; encrypted by restic like the data |
 | Backup keys and encryption password | Secret `sb-system/sb-backup`, copied as `sb-backup-env` into namespaces that run backup jobs; the password is also shown once to the admin |
 | TLS private keys | Secrets in the cluster; never leave it |
-| Admin and agent API tokens | The user's machine (`~/.config/slicedbread`); hashes in `sb-system/sb-auth` |
+| API tokens | Agent tokens on the user's machine (`~/.config/slicedbread`); expiring admin tokens only where an admin put them for automation; hashes in `sb-system/sb-auth` |
+| Dashboard accounts | Owner created through a one-time setup link (code hash in `sb-system/sb-setup`, deleted after use); members through invite links; bcrypt hashes in `sb-system/sb-auth` |
 | Login sessions | Signed, host-only browser cookies |
 
 ## Trust boundaries
@@ -34,7 +35,7 @@ What SlicedBread protects against, what it does not, and where the trust boundar
 ## Out of scope or not yet handled
 
 - **A compromised app escaping its container to the node.** Apps share nodes and run as root inside their containers. A kernel or container runtime escape gives access to the node, its secrets and other apps. Run only software you would run on a server you own.
-- **Theft of the user's machine or tokens.** The admin token and the Hetzner token give full control. Use a dedicated Hetzner project.
+- **Theft of the user's machine or tokens.** The CLI only holds an agent token, but the install folder holds the SSH key for the servers, and the Hetzner token gives full control of the project. Use a dedicated Hetzner project. Admin API tokens exist only if an admin creates one for automation, and they expire within 90 days.
 - **The image registry inside the cluster** has no login. A NetworkPolicy (kept in step with the node list by sb-control) lets in only build pods and the nodes' container runtime; app pods cannot reach it. Apps built from source deploy by digest, so overwriting a tag does not change what runs, and deletes through the registry API are off. A malicious build can still push to the registry (but not change a running app's digest).
 - **Builds run untrusted code.** Each build is its own Job with its own rootless BuildKit (uid 1000, not privileged, no capabilities to the node), so builds are separated from each other and from the node by the container boundary and a user namespace. They need unconfined seccomp and AppArmor to create that user namespace, so `sb-builds` is a privileged Pod Security namespace that only sb-control creates pods in. A kernel exploit from a build step reaches the node.
 - **Malicious template images.** Templates pin upstream images by tag, not by digest.

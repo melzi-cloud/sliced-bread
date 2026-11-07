@@ -162,7 +162,7 @@ func (s *Server) alertConditions(ctx context.Context, list []*apps.App, bc *Back
 
 // conditionStatus returns status and message of a named status condition.
 func conditionStatus(o kube.Obj, typ string) (string, string) {
-	conds, _ := o["status"].(map[string]any)["conditions"].([]any)
+	conds, _ := statusMap(o)["conditions"].([]any)
 	for _, c := range conds {
 		m, _ := c.(map[string]any)
 		if t, _ := m["type"].(string); t == typ {
@@ -254,6 +254,7 @@ func (s *Server) evaluateAlerts(ctx context.Context, list []*apps.App, bc *Backu
 		return
 	}
 	s.alertsAt = time.Now()
+	s.maybeSwitchIssuer(ctx)
 	st := s.loadAlertState(ctx)
 	opened, cleared := updateAlerts(st, s.alertConditions(ctx, list, bc, time.Now()), time.Now())
 	for _, a := range opened {
@@ -377,7 +378,7 @@ func (s *Server) apiAlerts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiAlertsWebhook(w http.ResponseWriter, r *http.Request) {
 	if scopeOf(r) != ScopeAdmin {
-		fail(w, 403, "configuring alerts needs an admin token", "")
+		fail(w, 403, "alert settings are changed by a human in the dashboard", "https://"+s.hosts().Auth()+"/settings")
 		return
 	}
 	var c WebhookConfig
@@ -401,11 +402,7 @@ func (s *Server) apiAlertsWebhook(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err.Error(), "")
 		return
 	}
-	if err := s.kube.Apply(ctx, kube.Obj{
-		"apiVersion": "v1", "kind": "Secret",
-		"metadata": kube.Obj{"name": alertsWebhook, "namespace": s.cfg.Namespace, "labels": kube.Obj{apps.ManagedByLabel: "slicedbread"}},
-		"type":     "Opaque", "stringData": kube.Obj{"url": c.URL, "format": c.Format},
-	}); err != nil {
+	if err := s.kube.Apply(ctx, webhookSecret(s.cfg.Namespace, c)); err != nil {
 		fail(w, 500, err.Error(), "")
 		return
 	}
@@ -414,7 +411,7 @@ func (s *Server) apiAlertsWebhook(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiAlertsTest(w http.ResponseWriter, r *http.Request) {
 	if scopeOf(r) != ScopeAdmin {
-		fail(w, 403, "needs an admin token", "")
+		fail(w, 403, "alert settings are changed by a human in the dashboard", "https://"+s.hosts().Auth()+"/settings")
 		return
 	}
 	hook, err := s.webhookConfig(r.Context())
@@ -428,4 +425,21 @@ func (s *Server) apiAlertsTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"sent": true})
+}
+
+func webhookSecret(ns string, c WebhookConfig) kube.Obj {
+	return kube.Obj{
+		"apiVersion": "v1", "kind": "Secret",
+		"metadata": kube.Obj{"name": alertsWebhook, "namespace": ns, "labels": kube.Obj{apps.ManagedByLabel: "slicedbread"}},
+		"type":     "Opaque", "stringData": kube.Obj{"url": c.URL, "format": c.Format},
+	}
+}
+
+// statusMap returns an object's status, or an empty map when it has none yet.
+func statusMap(o map[string]any) map[string]any {
+	m, _ := o["status"].(map[string]any)
+	if m == nil {
+		return map[string]any{}
+	}
+	return m
 }

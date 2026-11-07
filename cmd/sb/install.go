@@ -3,13 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,6 +16,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/melzi-cloud/sliced-bread/internal/acme"
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
 	"github.com/melzi-cloud/sliced-bread/internal/config"
 	"github.com/melzi-cloud/sliced-bread/internal/controlbin"
@@ -77,11 +75,14 @@ func baseConfig(hc, cf string) config.Dev {
 	}
 }
 
-const initUsage = `sb init --domain <base domain> --email <admin email> [--size 1|3] [--location nbg1] [--server-type cx23]
-        [--fallback-issuer zerossl] [--yes]
+const initUsage = `sb init --domain <base domain> [--size 1|3] [--location nbg1] [--server-type cx23]
+        [--email you@example.com --fallback-issuer zerossl] [--yes]
         [--backup-endpoint https://... --backup-bucket B [--backup-region auto] [--backup-prefix path]]
 
 Creates a SlicedBread install in your own Hetzner account. Apps are served at https://<app>.<base domain>.
+At the end it prints a one-time setup link (you create your owner account in the browser) and the
+backup encryption password (save it in your password manager). Approvals, members, backup settings
+and other admin work happen in that dashboard; the CLI is left logged in with an agent token.
 Secrets (read from the environment, or prompted for on a terminal):
   HCLOUD_TOKEN           Hetzner Cloud API token (read and write). Use a dedicated Hetzner project.
   CLOUDFLARE_API_TOKEN   Cloudflare token with Zone / DNS / Edit on the zone that contains the base domain
@@ -117,7 +118,7 @@ func runInit(args []string) error {
 		return &exitErr{exitUsage, err.Error() + "\n\n" + initUsage}
 	}
 	*domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(*domain)), ".")
-	if !domainRE.MatchString(*domain) || !strings.Contains(*email, "@") {
+	if !domainRE.MatchString(*domain) || (*email != "" && !strings.Contains(*email, "@")) {
 		return &exitErr{exitUsage, initUsage}
 	}
 	if *size != 1 && *size != 3 {
@@ -141,11 +142,14 @@ func runInit(args []string) error {
 		if !ok {
 			return &exitErr{exitUsage, "--fallback-issuer must be zerossl"}
 		}
+		if *email == "" {
+			return &exitErr{exitUsage, "--fallback-issuer zerossl needs --email (ZeroSSL registers an account with it). Without it, the dashboard sets up ZeroSSL with your owner account's email after setup."}
+		}
 		kid, hmac := strings.TrimSpace(os.Getenv("SB_EAB_KID")), strings.TrimSpace(os.Getenv("SB_EAB_HMAC"))
 		if kid == "" || hmac == "" {
 			var err error
 			fmt.Fprintln(os.Stderr, "requesting ZeroSSL ACME credentials for", *email)
-			if kid, hmac, err = zeroSSLEAB(*email); err != nil {
+			if kid, hmac, err = acme.ZeroSSLEAB(context.Background(), *email); err != nil {
 				return &exitErr{exitError, "ZeroSSL: " + err.Error() + " (or set SB_EAB_KID and SB_EAB_HMAC)"}
 			}
 		}
@@ -208,19 +212,37 @@ func runInit(args []string) error {
 		err = p.InstallAddons(ctx, st)
 	}
 	if err == nil {
-		err = p.DeployControl(ctx, st, root, *email)
+		err = p.DeployControl(ctx, st, root)
 	}
 	if err == nil {
 		err = p.FetchCredentials(ctx, st)
 	}
+	// The backup encryption password exists from the start, so configuring a bucket
+	// later (in the dashboard) never creates a second one to save.
+	backupPassword := strings.TrimSpace(os.Getenv("SB_BACKUP_PASSWORD"))
+	if backupPassword == "" {
+		backupPassword = tenant.HumanCode(32)
+	}
+	if err == nil {
+		err = p.InstallBackupSecret(ctx, st, tenant.BackupSettings{Password: backupPassword,
+			Endpoint: *bEndpoint, Bucket: *bBucket, Region: *bRegion, Prefix: *bPrefix, KeyID: bKey, Secret: bSecret})
+	}
+	var setupLink string
+	if err == nil {
+		setupLink, err = p.SetupCode(ctx, st)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\ninstall %s failed. Everything it created is labelled sb/run-id=%s; remove it with: sb destroy %s\n", runID, runID, runID)
+		if strings.Contains(err.Error(), "certificate not issued") && cfg.Fallback == nil {
+			fmt.Fprintln(os.Stderr, "Let's Encrypt did not issue the certificate. To use ZeroSSL instead, destroy this install and rerun sb init with: --email you@example.com --fallback-issuer zerossl")
+		}
 		return err
 	}
 	cfgPath := configPath()
-	b, _ := os.ReadFile(filepath.Join(st.Dir, "cli-admin.json"))
+	agentCfg := filepath.Join(st.Dir, "cli-agent.json")
+	b, _ := os.ReadFile(agentCfg)
 	if _, statErr := os.Stat(cfgPath); statErr == nil && os.Getenv("SB_CONFIG") == "" {
-		cfgPath = filepath.Join(st.Dir, "cli-admin.json")
+		cfgPath = agentCfg
 		fmt.Fprintf(os.Stderr, "note: %s already exists, so it was left alone. Use: export SB_CONFIG=%s\n", configPath(), cfgPath)
 	} else {
 		os.MkdirAll(filepath.Dir(cfgPath), 0o700)
@@ -228,42 +250,58 @@ func runInit(args []string) error {
 			return err
 		}
 	}
-	backupLine := "not configured; set up with: sb backups configure (no backups until then)"
+	backupLine := "no bucket yet: set one up in the dashboard (Settings). Until then nothing is backed up."
 	if *bBucket != "" {
-		var cc cliConfig
-		json.Unmarshal(b, &cc)
-		cl := &client{cfg: cc, http: &http.Client{Timeout: 60 * time.Second}}
-		rb, _, err := cl.call("PUT", "/v1/backups/config?hour=3", map[string]any{"endpoint": *bEndpoint, "bucket": *bBucket,
-			"region": *bRegion, "prefix": *bPrefix, "hour": 3, "accessKeyId": bKey, "secretAccessKey": bSecret,
-			"password": strings.TrimSpace(os.Getenv("SB_BACKUP_PASSWORD"))})
-		if err != nil {
-			backupLine = "FAILED to configure (" + err.Error() + "); retry with: sb backups configure"
-		} else {
-			var r struct {
-				Target   string `json:"target"`
-				Password string `json:"password"`
-			}
-			json.Unmarshal(rb, &r)
-			backupLine = r.Target + ", daily at 03:00 UTC with a restore test after each backup"
-			if r.Password != "" {
-				pw := filepath.Join(st.Dir, "backup-password")
-				os.WriteFile(pw, []byte(r.Password+"\n"), 0o600)
-				backupLine += "\n               encryption password saved to " + pw + ": copy it somewhere safe, backups cannot be read without it"
-			}
+		prefix := *bPrefix
+		if prefix == "" {
+			prefix = "slicedbread/" + st.Domain
 		}
+		backupLine = strings.TrimRight(*bEndpoint, "/") + "/" + *bBucket + "/" + prefix + ", daily at 03:00 UTC with a restore test after each backup"
 	}
 	fmt.Printf(`
 SlicedBread is ready.
+
+1. Finish setup in your browser (creates your owner account; works once, for 24 hours):
+     %s
+
+2. Backup encryption password:
+     %s
+   Save it in your password manager now. Your backups are encrypted with it, and if your
+   servers are ever lost it is the only way to read them. It is not stored on this machine.
+
   install id:  %s
   apps:        https://<app>.%s
-  dashboard:   https://auth.%s   (email and password in %s)
-  this CLI:    logged in with an ADMIN token (%s): it can approve its own requests
-  agents:      use the agent token instead, so exposure changes, deletes and restores wait for you:
-                 export SB_CONFIG=%s
-               (or run "sb login --api https://api.%s" in the agent's environment and approve it in the browser)%s
   backups:     %s
-  remove:      sb destroy %s
-`, st.RunID, st.Domain, st.Domain, filepath.Join(st.Dir, "admin-login.json"), cfgPath, filepath.Join(st.Dir, "cli-agent.json"), st.Domain, expiryLine(st), backupLine, st.RunID)
+  this CLI:    logged in with an agent token (%s). Agents use it too: deploys and
+               config go through, making apps public, deleting and restoring wait for your
+               approval in the dashboard.%s
+  later:       sb setup-link %s (new setup link), sb destroy %s (remove everything)
+`, setupLink, backupPassword, st.RunID, st.Domain, backupLine, cfgPath, expiryLine(st), st.RunID, st.RunID)
+	if !*yes && term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprint(os.Stderr, "\nPress Enter once you have saved the backup encryption password. ")
+		bufio.NewReader(os.Stdin).ReadString('\n')
+	}
+	return nil
+}
+
+// runSetupLink installs a fresh one-time setup code and prints the link.
+func runSetupLink(args []string) error {
+	if len(args) != 1 {
+		return &exitErr{exitUsage, "usage: sb setup-link <install-id|domain>\nPrints a new one-time link to create the owner account (works once, for 24 hours). Earlier links stop working."}
+	}
+	st, err := loadInstall(args[0])
+	if err != nil {
+		return err
+	}
+	p := tenant.New(baseConfig("", ""), installsRoot())
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	link, err := p.SetupCode(ctx, st)
+	if err != nil {
+		return err
+	}
+	fmt.Println(link)
+	fmt.Fprintln(os.Stderr, "Open it in your browser to create the owner account. If the install is already set up, the page says so.")
 	return nil
 }
 
@@ -372,14 +410,7 @@ func runUpgrade(args []string) error {
 	p.Logf = func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
-	email := "admin@" + st.Domain
-	if b, err := os.ReadFile(filepath.Join(st.Dir, "admin-login.json")); err == nil {
-		var l struct{ Email string }
-		if json.Unmarshal(b, &l) == nil && l.Email != "" {
-			email = l.Email
-		}
-	}
-	if err := p.DeployControl(ctx, st, root, email); err != nil {
+	if err := p.DeployControl(ctx, st, root); err != nil {
 		return err
 	}
 	if _, err := st.Kubectl(ctx, "-n sb-system rollout status deploy/sb-control --timeout=180s", nil); err != nil {
@@ -416,29 +447,6 @@ func runSSH(args []string) error {
 	}
 	fmt.Printf("ssh -i %s -o UserKnownHostsFile=%s -o StrictHostKeyChecking=yes root@%s\n", filepath.Join(st.Dir, "id_ed25519"), kh, st.Nodes[i].PublicIP)
 	return nil
-}
-
-// zeroSSLEAB requests ACME external account binding credentials from ZeroSSL for an email
-// address, the same way acme.sh and Caddy do. The credentials are reusable.
-func zeroSSLEAB(email string) (kid, hmac string, err error) {
-	resp, err := http.PostForm("https://api.zerossl.com/acme/eab-credentials-email", url.Values{"email": {email}})
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-	var r struct {
-		Success bool   `json:"success"`
-		KID     string `json:"eab_kid"`
-		HMAC    string `json:"eab_hmac_key"`
-		Error   any    `json:"error"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&r); err != nil {
-		return "", "", fmt.Errorf("unexpected response (HTTP %d)", resp.StatusCode)
-	}
-	if !r.Success || r.KID == "" || r.HMAC == "" {
-		return "", "", fmt.Errorf("no credentials returned: %v", r.Error)
-	}
-	return r.KID, r.HMAC, nil
 }
 
 func expiryLine(st *tenant.State) string {

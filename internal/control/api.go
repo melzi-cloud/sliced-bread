@@ -609,7 +609,7 @@ func (s *Server) apiAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if act.AdminOnly && scopeOf(r) != ScopeAdmin {
-		fail(w, 403, "action "+act.Name+" is for humans (admin token only)", "ask the user to run: sb action "+a.Name+" "+act.Name)
+		fail(w, 403, "action "+act.Name+" shows credentials, so a human runs it in the dashboard", "https://"+s.hosts().Auth()+"/apps/"+a.Name)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
@@ -669,7 +669,7 @@ func (s *Server) decide(ctx context.Context, id, decision string) (*Approval, er
 
 func (s *Server) apiDecide(w http.ResponseWriter, r *http.Request) {
 	if scopeOf(r) != ScopeAdmin {
-		fail(w, 403, "only a human with an admin token can approve", "ask the user to approve at https://auth."+s.cfg.Domain+"/approvals")
+		fail(w, 403, "approvals are made by a human in the dashboard", "ask the user to approve at https://"+s.hosts().Auth()+"/approvals")
 		return
 	}
 	ap, err := s.decide(r.Context(), r.PathValue("id"), r.PathValue("decision"))

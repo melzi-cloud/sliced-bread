@@ -283,7 +283,7 @@ func (s *Server) apiMembers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) requireAdminToken(w http.ResponseWriter, r *http.Request) bool {
 	if scopeOf(r) != ScopeAdmin {
-		fail(w, 403, "managing members needs an admin token", "ask the user (an admin) to run this, or use the Members page on the dashboard")
+		fail(w, 403, "members are managed by a human in the dashboard", "https://"+s.hosts().Auth()+"/members")
 		return false
 	}
 	return true

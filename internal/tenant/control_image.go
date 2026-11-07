@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -13,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -136,7 +139,7 @@ func (p *Provisioner) ImportImage(ctx context.Context, st *State, tarBytes []byt
 }
 
 // DeployControl builds sb-control, imports it on all nodes and (re)applies the platform manifest.
-func (p *Provisioner) DeployControl(ctx context.Context, st *State, repoRoot, adminEmail string) error {
+func (p *Provisioner) DeployControl(ctx context.Context, st *State, repoRoot string) error {
 	p.Logf("[%s] building sb-control image", st.RunID)
 	ref, tb, err := BuildControlImage(ctx, repoRoot)
 	if err != nil {
@@ -146,7 +149,7 @@ func (p *Provisioner) DeployControl(ctx context.Context, st *State, repoRoot, ad
 	if err := p.ImportImage(ctx, st, tb); err != nil {
 		return err
 	}
-	m, err := PlatformManifest(PlatformParams{Domain: st.Domain, AdminEmail: adminEmail, ControlImage: ref})
+	m, err := PlatformManifest(PlatformParams{Domain: st.Domain, ControlImage: ref})
 	if err != nil {
 		return err
 	}
@@ -210,14 +213,80 @@ func (p *Provisioner) FetchCredentials(ctx context.Context, st *State) error {
 	if err := write("cli-agent.json", CLIConfig{API: api, Token: dec["agent-token"]}); err != nil {
 		return err
 	}
-	if err := write("cli-admin.json", CLIConfig{API: api, Token: dec["admin-token"]}); err != nil {
-		return err
-	}
-	if err := write("admin-login.json", map[string]string{"url": "https://auth." + st.Domain, "email": dec["admin-email"], "password": dec["admin-password"]}); err != nil {
-		return err
-	}
 	if _, err := st.Kubectl(ctx, "-n sb-system delete secret sb-bootstrap", nil); err != nil && !strings.Contains(err.Error(), "NotFound") {
 		return err
+	}
+	return nil
+}
+
+// SetupCode installs a fresh one-time setup code and returns the setup link. The owner
+// account is created by whoever opens the link first, so the code only ever goes to the
+// terminal of the person running sb init. It expires after 24 hours and replaces any
+// earlier code.
+func (p *Provisioner) SetupCode(ctx context.Context, st *State) (string, error) {
+	code := HumanCode(12)
+	sum := sha256.Sum256([]byte(code))
+	secret := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata: {name: sb-setup, namespace: sb-system}
+type: Opaque
+stringData:
+  sha256: %q
+  expires: %q
+`, hex.EncodeToString(sum[:]), strconv.FormatInt(time.Now().Add(24*time.Hour).Unix(), 10))
+	if _, err := st.Kubectl(ctx, "apply -f -", []byte(secret)); err != nil {
+		return "", fmt.Errorf("install setup code: %w", err)
+	}
+	return "https://auth." + st.Domain + "/setup?code=" + code, nil
+}
+
+// HumanCode returns a random code in groups of 4 from an alphabet without look-alikes.
+func HumanCode(n int) string {
+	const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	var out []byte
+	for i, c := range b {
+		if i > 0 && i%4 == 0 {
+			out = append(out, '-')
+		}
+		out = append(out, alphabet[int(c)%len(alphabet)])
+	}
+	return string(out)
+}
+
+// BackupSettings is what sb init writes into the backup secret.
+type BackupSettings struct {
+	Password                                        string
+	Endpoint, Bucket, Region, Prefix, KeyID, Secret string
+}
+
+// InstallBackupSecret writes the backup encryption password (and the bucket, if given)
+// into the cluster over stdin. Configuring the bucket later keeps this password.
+func (p *Provisioner) InstallBackupSecret(ctx context.Context, st *State, b BackupSettings) error {
+	data := map[string]string{"password": b.Password, "hour": "3"}
+	if b.Bucket != "" {
+		region := b.Region
+		if region == "" {
+			region = "auto"
+		}
+		prefix := b.Prefix
+		if prefix == "" {
+			prefix = "slicedbread/" + st.Domain
+		}
+		data["endpoint"], data["bucket"], data["region"], data["prefix"] = b.Endpoint, b.Bucket, region, prefix
+		data["access_key_id"], data["secret_access_key"] = b.KeyID, b.Secret
+	}
+	var lines []string
+	for k, v := range data {
+		lines = append(lines, fmt.Sprintf("  %s: %q", k, v))
+	}
+	sort.Strings(lines)
+	secret := "apiVersion: v1\nkind: Secret\nmetadata: {name: sb-backup, namespace: sb-system, labels: {app.kubernetes.io/managed-by: slicedbread}}\ntype: Opaque\nstringData:\n" + strings.Join(lines, "\n") + "\n"
+	if _, err := st.Kubectl(ctx, "apply -f -", []byte(secret)); err != nil {
+		return fmt.Errorf("install backup settings: %w", err)
 	}
 	return nil
 }

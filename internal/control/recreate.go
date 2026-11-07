@@ -468,7 +468,7 @@ func (s *Server) apiRecreate(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if scopeOf(r) != ScopeAdmin {
 		if req.All || len(req.Apps) != 1 {
-			fail(w, 403, "restoring several apps at once needs an admin token", "ask the user to run: sb restore --all")
+			fail(w, 403, "restoring several apps at once is done by a human in the dashboard", "https://"+s.hosts().Auth()+"/settings")
 			return
 		}
 		ap, err := s.requestApproval(ctx, "recreate", req.Apps[0], "recreate deleted app "+req.Apps[0]+" from its backup"+map[bool]string{true: " (snapshot " + req.Snapshot + ")", false: ""}[req.Snapshot != ""], nil, scopeOf(r))

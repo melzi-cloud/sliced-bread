@@ -35,12 +35,17 @@ func (e *exitErr) Error() string { return e.msg }
 
 const userUsage = `sb: deploy and operate apps on SlicedBread.
 
-Install (on your own Hetzner account)
-  sb init --domain apps.example.com --email you@example.com [--size 1|3]   see: sb init --help
+Install (on your own Hetzner account; run by a human)
+  sb init --domain apps.example.com [--size 1|3]   prints a setup link and the backup password; see: sb init --help
+  sb setup-link <install-id>          a new one-time link to create the owner account
   sb installs                         installs created from this machine
   sb upgrade <install-id>             roll out the control plane built into this sb
   sb ssh <install-id> [node]          print an SSH command for a node (host key pinned)
   sb destroy <install-id>             delete an install and all its data
+
+Humans do admin work in the dashboard (https://auth.<tenant-domain>): approvals, members,
+backup settings and password, restoring every app, alert webhook, export, credentials.
+This CLI is for agents (and humans doing agent-level work); its tokens cannot do those things.
 
 Setup
   sb login --api https://api.<tenant-domain>    prints a link; a human approves in the browser
@@ -84,26 +89,16 @@ Backups (apps with a volume or database; each backup is followed by a restore te
                                                    stops the app meanwhile; agents need human approval
   sb backups --repository             every app in the backup repository, including deleted ones
   sb restore <app> --recreate [--snapshot ID] [--wait]   bring back a deleted app from its backup
-  sb restore --all [--wait]           admin token: recreate every app in the repository (new install)
-  sb backups configure --endpoint https://... --bucket B [--region auto] [--hour 3]   admin token; keys from env
-  sb backups password                 admin token: the backups' encryption password
-  sb export <dir> [--include-secrets] admin token: every app as Kubernetes manifests
 
 Alerts (also on the dashboard at https://auth.<tenant-domain>/)
   sb alerts                           open alerts: failed backups or restore tests, apps down, certificates, servers
-  sb alerts configure --webhook URL [--format json|slack|discord|ntfy]   admin token; --off to remove
-  sb alerts test                      admin token: send a test message to the webhook
 
 Members (people who get past the login wall)
   sb members                          members, invites, whether members can approve
-  sb members invite <email> [--admin] admin token: one-time invite link (you send it)
-  sb members remove <email>           admin token: remove a member or revoke an invite
-  sb members role <email> admin|member
-  sb members settings --members-can-approve true|false   admin token
 
 Approvals (privileged changes requested by agents)
   sb approvals [--app <app>] [--wait <id>] [--timeout 30m]   list (optionally one app), or block until a human decides
-  sb approve <id> | sb deny <id>      humans only (admin token); agents cannot approve
+  (a human approves or denies in the dashboard: https://auth.<tenant-domain>/approvals)
 
 Output is human-readable; add --json to any command for JSON. Config: $SB_CONFIG or ~/.config/slicedbread/config.json.
 Exit codes: 0 ok; 1 error (failed build, denied or obsolete approval, sb check --contains not found);
@@ -885,19 +880,7 @@ func runUser(args []string) error {
 		return nil
 
 	case "approve", "deny":
-		pos, err := parse(fs, rest)
-		if err != nil {
-			return err
-		}
-		if len(pos) < 1 {
-			return &exitErr{exitUsage, "usage: sb " + cmd + " <approval-id>"}
-		}
-		b, _, err := c.call("POST", "/v1/approvals/"+url.PathEscape(pos[0])+"/"+cmd, nil)
-		if err != nil {
-			return err
-		}
-		c.print(b)
-		return nil
+		return c.humanOnly("Approving and denying", "/approvals")
 	}
 	return &exitErr{exitUsage, "unknown command " + cmd + "\n\n" + userUsage}
 }
@@ -1166,4 +1149,15 @@ func needApp(pos []string, usage string) (string, error) {
 		return "", &exitErr{exitUsage, "usage: " + usage}
 	}
 	return pos[0], nil
+}
+
+// dashboardURL is the dashboard page for this CLI's install.
+func (c *client) dashboardURL(page string) string {
+	return strings.Replace(strings.TrimSuffix(c.cfg.API, "/"), "://api.", "://auth.", 1) + page
+}
+
+// humanOnly explains that a command moved to the dashboard, where humans sign in.
+func (c *client) humanOnly(what, page string) error {
+	return &exitErr{exitError, what + " is done by a human in the dashboard: " + c.dashboardURL(page) +
+		"\nAgents: give the user this link. API tokens, including this one, cannot do it."}
 }

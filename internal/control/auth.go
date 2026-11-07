@@ -48,10 +48,12 @@ type user struct {
 }
 
 type token struct {
-	Name   string `json:"name"`
-	Scope  string `json:"scope"`
-	SHA256 string `json:"sha256"`
-	Owner  string `json:"owner,omitempty"` // email of the human who approved it
+	Name    string `json:"name"`
+	Scope   string `json:"scope"`
+	SHA256  string `json:"sha256"`
+	Owner   string `json:"owner,omitempty"`   // email of the human who approved or created it
+	Expires int64  `json:"expires,omitempty"` // unix seconds; 0 = no expiry
+	Created int64  `json:"created,omitempty"`
 }
 
 type authState struct {
@@ -98,7 +100,7 @@ func sha(s string) string {
 // LoadAuth reads auth state from the sb-auth secret, creating it with an admin
 // user and two API tokens on first start. Initial credentials go to the
 // sb-bootstrap secret so the operator can fetch them once.
-func LoadAuth(ctx context.Context, k *kube.Client, ns, domain, adminEmail string) (*Auth, error) {
+func LoadAuth(ctx context.Context, k *kube.Client, ns, domain string) (*Auth, error) {
 	a := &Auth{domain: domain, kube: k, ns: ns}
 	var sec kube.Obj
 	err := k.Get(ctx, "v1", "Secret", ns, authSecret, &sec)
@@ -108,28 +110,22 @@ func LoadAuth(ctx context.Context, k *kube.Client, ns, domain, adminEmail string
 			return nil, err
 		}
 	} else if kube.IsNotFound(err) {
-		password := randString(15)
-		adminTok, agentTok := "sbt_"+randString(24), "sbt_"+randString(24)
-		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-		if err != nil {
-			return nil, err
-		}
+		// First start: no user and no admin token. The owner account is created through a
+		// one-time setup link (see setup.go); the CLI gets an agent token, which cannot
+		// approve its own requests.
+		agentTok := "sbt_" + randString(24)
 		a.st = authState{
 			SessionKey: randString(32),
-			Users:      []user{{Email: adminEmail, Hash: string(hash), Role: RoleAdmin}},
-			Tokens:     []token{{Name: "admin", Scope: ScopeAdmin, SHA256: sha(adminTok)}, {Name: "agent", Scope: ScopeAgent, SHA256: sha(agentTok)}},
+			Tokens:     []token{{Name: "agent (sb init)", Scope: ScopeAgent, SHA256: sha(agentTok), Created: time.Now().Unix()}},
 		}
 		if err := a.save(ctx, k, ns); err != nil {
 			return nil, err
 		}
 		boot := kube.Obj{
 			"apiVersion": "v1", "kind": "Secret",
-			"metadata": kube.Obj{"name": bootSecret, "namespace": ns},
-			"type":     "Opaque",
-			"stringData": kube.Obj{
-				"admin-email": adminEmail, "admin-password": password,
-				"admin-token": adminTok, "agent-token": agentTok,
-			},
+			"metadata":   kube.Obj{"name": bootSecret, "namespace": ns},
+			"type":       "Opaque",
+			"stringData": kube.Obj{"agent-token": agentTok},
 		}
 		if err := k.Apply(ctx, boot); err != nil {
 			return nil, err
@@ -177,6 +173,9 @@ func (a *Auth) TokenScope(r *http.Request) string {
 	defer a.mu.RUnlock()
 	for _, t := range a.st.Tokens {
 		if subtle.ConstantTimeCompare([]byte(t.SHA256), []byte(sum)) == 1 {
+			if t.Expires > 0 && time.Now().Unix() >= t.Expires {
+				return ""
+			}
 			return t.Scope
 		}
 	}

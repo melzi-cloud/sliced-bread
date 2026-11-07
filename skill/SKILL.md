@@ -74,7 +74,7 @@ Narrowing access (back to `wall`, signups=false) never needs approval.
 When you see exit code 3:
 
 1. Tell the user what you requested and give them the `approve at:` URL from the output.
-2. Do not try to work around it (for example by redeploying under another name or with another mode). You cannot approve; `sb approve` is for humans with an admin token.
+2. Do not try to work around it (for example by redeploying under another name or with another mode). You cannot approve: humans approve in the dashboard, and no CLI token can.
 3. Wait with `sb approvals --wait <id> [--timeout 30m]`. It exits 0 when approved, 1 when denied or obsolete, and 3 if still pending at the timeout. Or stop and report. `sb approvals --app <app>` lists one app's approvals. Once approved, the change applies automatically. `sb status <app>` lists pending approvals for the app.
 4. If the app changes or is deleted before approval, the approval becomes obsolete and must be requested again.
 
@@ -122,7 +122,7 @@ Some templates expose typed actions so you do not have to click through UIs:
 sb action <app> <action> --input key=value
 ```
 
-Actions marked `adminOnly` are for the human; if you get "admin token only", tell the user to run it.
+Actions marked `adminOnly` show credentials, so a human runs them on the app's page in the dashboard (`https://auth.<tenant-domain>/apps/<app>`); give the user that link.
 
 ### Example: add analytics to an app
 
@@ -137,7 +137,7 @@ Then add the snippet inside `<head>` of the app's HTML (for Vite/React/Lovable p
 
 Tell the user two things:
 - If the tracked app is behind the wall, only signed-in team members' visits are counted. Real visitor numbers need the app to be `public` (`sb access myapp public`, needs approval). Do not request that unless the user wants it.
-- The Umami dashboard has its own login, available to the human with `sb action analytics dashboard_login` (admin token).
+- The Umami dashboard has its own login; the human gets it from the `dashboard_login` action on the app's page in the dashboard.
 
 ### Example: password manager
 
@@ -175,8 +175,12 @@ What a restore test checks, so you can report it accurately: restic restores the
 
 - A restore stops the app, replaces its volumes and database, and starts it again. With an agent token it needs human approval (exit code 3); tell the user what will be lost (everything since that snapshot).
 - Apps that keep SQLite files (Vaultwarden) are stopped for a few seconds during each backup. `sb status` then shows `paused`; it resumes by itself.
-- If backups are not configured, tell the user: an admin runs `sb backups configure` (or passed backup flags to `sb init`). Until then nothing is backed up.
-- `sb export <dir>` (admin token) writes every app as plain Kubernetes manifests.
+- If backups are not configured, tell the user to set up a bucket on the dashboard's Settings page. Until then nothing is backed up.
+- Restoring every app from the bucket (for example into a new install) and exporting manifests are dashboard actions for the human.
+
+## Humans and agents
+
+You work through the CLI with an agent token. A human does admin work in the dashboard at `https://auth.<tenant-domain>`: approving your requests, members, backup settings and the encryption password, restoring everything from the bucket, alert webhooks, export, and actions that show credentials. Commands for those (`sb approve`, `sb backups configure`, `sb export`, ...) print the dashboard link instead; pass it to the user.
 
 ## Members
 
@@ -184,7 +188,7 @@ What a restore test checks, so you can report it accurately: restic restores the
 sb members                       # who gets past the login wall, and whether members can approve
 ```
 
-Inviting, removing and changing roles needs an admin token, so with an agent token tell the user the command to run (`sb members invite <email> [--admin]`) or point them to the Members page on the dashboard. Approvals of your requests can come from any admin, or from members when an admin has allowed it.
+Inviting, removing and changing roles is done by an admin on the dashboard's Members page; give the user that link (`sb members` prints it).
 
 ## Alerts
 
@@ -192,18 +196,18 @@ Inviting, removing and changing roles needs an admin token, so with an agent tok
 sb alerts        # open alerts: failed backups or restore tests, apps down for 15 minutes, certificates, servers
 ```
 
-The dashboard at `https://auth.<tenant-domain>/` shows the same list. Each alert has a `next:` hint with the command to investigate. Check `sb alerts` at the start of operational work and after finishing a task; report open alerts to the user. Admins can send alerts to a webhook with `sb alerts configure --webhook <url> --format slack|discord|ntfy|json` and check it with `sb alerts test`.
+The dashboard at `https://auth.<tenant-domain>/` shows the same list. Each alert has a `next:` hint with the command to investigate. Check `sb alerts` at the start of operational work and after finishing a task; report open alerts to the user. Admins can send alerts to a webhook (Slack, Discord, ntfy or JSON) on the dashboard's Settings page.
 
 ## Installing
 
 Only when the user asks for a new install. It runs from the user's machine against their own Hetzner account and Cloudflare domain:
 
 ```sh
-sb init --domain apps.example.com --email you@example.com --size 1 \
+sb init --domain apps.example.com --size 1 \
   [--backup-endpoint https://<s3 endpoint> --backup-bucket <bucket>]
 ```
 
-Secrets come from environment variables, never flags: `HCLOUD_TOKEN`, `CLOUDFLARE_API_TOKEN` (or `CF_API_TOKEN`), and for backups `SB_BACKUP_ACCESS_KEY_ID` and `SB_BACKUP_SECRET_ACCESS_KEY`. Never print them. `--size 1` is one server (about EUR 7/month, no high availability), `--size 3` is three servers and a load balancer (about EUR 29/month). It takes 5 to 10 minutes, then the CLI is logged in with an **admin** token, which approves its own requests. Before doing anything else, switch yourself to the agent token that `sb init` printed (`export SB_CONFIG=<install dir>/cli-agent.json`) so exposure changes, deletes and restores wait for the user, as the rest of this file assumes. Admin-only steps (`sb backups configure`, `sb export`, approvals) are for the user. Tell the user where the dashboard login and the backup encryption password were saved (printed at the end), and that `sb destroy <install-id>` removes everything.
+Secrets come from environment variables, never flags: `HCLOUD_TOKEN`, `CLOUDFLARE_API_TOKEN` (or `CF_API_TOKEN`), and for backups `SB_BACKUP_ACCESS_KEY_ID` and `SB_BACKUP_SECRET_ACCESS_KEY`. Never print them. `--size 1` is one server (about EUR 7/month, no high availability), `--size 3` is three servers and a load balancer (about EUR 29/month). It takes 5 to 10 minutes. At the end it prints two things only the human should handle: a one-time **setup link** (the user opens it and creates the owner account) and the **backup encryption password** (the user saves it in their password manager; do not repeat it, store it or put it anywhere else). Tell the user to do both. The CLI is then logged in with an agent token, which is all you need; everything admin happens in the dashboard. `sb setup-link <install-id>` prints a fresh setup link if the first one expired; `sb destroy <install-id>` removes everything.
 
 ## Troubleshooting
 

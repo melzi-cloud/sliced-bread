@@ -109,7 +109,7 @@ The prototype's main QA loop is an LLM agent operating a live tenant with nothin
 ```sh
 make build
 SB_STATE_DIR=$PWD/.sb/installs SB_CONFIG=$PWD/.sb/cli/one.json \
-  hack/secrets-env bin/sb init --domain one.test.slicedbread.dev --email admin@example.com --size 1 --yes --expire-after 4h
+  hack/secrets-env bin/sb init --domain one.test.slicedbread.dev --size 1 --yes --expire-after 4h
 ```
 
 `hack/secrets-env` provides `HCLOUD_TOKEN` and `CF_API_TOKEN` (which `sb init` accepts as the Cloudflare token). For backups to the dev bucket, map `SB_S3_ACCESS_KEY`/`SB_S3_SECRET_KEY` to `SB_BACKUP_ACCESS_KEY_ID`/`SB_BACKUP_SECRET_ACCESS_KEY` and use `--backup-endpoint https://s3.duti.dev --backup-bucket sb-dev --backup-region garage --backup-prefix test/<name>` (endpoint and bucket are in `dev.env`).

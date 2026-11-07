@@ -49,7 +49,7 @@ func registryPolicyObj(nodeSources []string) kube.Obj {
 func nodeSources(nodes []kube.Obj) []string {
 	seen := map[string]bool{}
 	for _, n := range nodes {
-		if addrs, ok := n["status"].(map[string]any)["addresses"].([]any); ok {
+		if addrs, ok := statusMap(n)["addresses"].([]any); ok {
 			for _, x := range addrs {
 				m, _ := x.(map[string]any)
 				if t, _ := m["type"].(string); t == "InternalIP" || t == "ExternalIP" {

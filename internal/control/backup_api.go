@@ -1,8 +1,10 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -67,7 +69,7 @@ func twoDigit(n int) string {
 
 func (s *Server) apiBackupConfig(w http.ResponseWriter, r *http.Request) {
 	if scopeOf(r) != ScopeAdmin {
-		fail(w, 403, "configuring backups needs an admin token", "")
+		fail(w, 403, "backups are configured by a human in the dashboard", "https://"+s.hosts().Auth()+"/settings")
 		return
 	}
 	var c BackupConfig
@@ -75,32 +77,9 @@ func (s *Server) apiBackupConfig(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "bad JSON: "+err.Error(), "")
 		return
 	}
-	if c.Prefix == "" {
-		c.Prefix = "slicedbread/" + s.cfg.Domain
-	}
-	if c.Hour == 0 && r.URL.Query().Get("hour") == "" {
-		c.Hour = 3
-	}
-	if err := c.validate(); err != nil {
-		fail(w, 400, err.Error(), "")
-		return
-	}
-	ctx := r.Context()
-	prev, err := s.backupConfig(ctx)
+	generated, err := s.configureBackups(r.Context(), &c, r.URL.Query().Get("hour") != "")
 	if err != nil {
-		fail(w, 500, err.Error(), "")
-		return
-	}
-	generated := false
-	if c.Password == "" {
-		if prev != nil && prev.Password != "" && prev.Repository() == c.Repository() {
-			c.Password = prev.Password
-		} else {
-			c.Password, generated = newResticPassword(), true
-		}
-	}
-	if err := s.saveBackupConfig(ctx, c); err != nil {
-		fail(w, 500, err.Error(), "")
+		fail(w, 400, err.Error(), "")
 		return
 	}
 	resp := map[string]any{"configured": true, "target": strings.TrimPrefix(c.Repository(), "s3:"), "hour": c.Hour}
@@ -113,10 +92,10 @@ func (s *Server) apiBackupConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiBackupPassword(w http.ResponseWriter, r *http.Request) {
 	if scopeOf(r) != ScopeAdmin {
-		fail(w, 403, "needs an admin token", "")
+		fail(w, 403, "the backup encryption password is shown to a human in the dashboard", "https://"+s.hosts().Auth()+"/settings")
 		return
 	}
-	c, err := s.backupConfig(r.Context())
+	c, err := s.backupSecret(r.Context())
 	if err != nil || c == nil {
 		fail(w, 404, "backups are not configured", "")
 		return
@@ -200,26 +179,33 @@ func (s *Server) apiRestore(w http.ResponseWriter, r *http.Request) {
 // apiExport returns every app's spec and its rendered Kubernetes objects.
 func (s *Server) apiExport(w http.ResponseWriter, r *http.Request) {
 	if scopeOf(r) != ScopeAdmin {
-		fail(w, 403, "export needs an admin token (it can include secret values)", "")
+		fail(w, 403, "export is done by a human in the dashboard", "https://"+s.hosts().Auth()+"/settings")
 		return
 	}
-	ctx := r.Context()
-	withSecrets := r.URL.Query().Get("secrets") == "true"
-	list, err := s.listApps(ctx)
+	out, err := s.exportData(r.Context(), r.URL.Query().Get("secrets") == "true")
 	if err != nil {
 		fail(w, 500, err.Error(), "")
 		return
 	}
-	type exported struct {
-		Spec      *apps.App `json:"spec"`
-		Manifests kube.Obj  `json:"manifests"`
+	writeJSON(w, 200, out)
+}
+
+type exported struct {
+	Spec      *apps.App `json:"spec"`
+	Manifests kube.Obj  `json:"manifests"`
+}
+
+// exportData collects every app's spec and rendered Kubernetes objects.
+func (s *Server) exportData(ctx context.Context, withSecrets bool) (map[string]any, error) {
+	list, err := s.listApps(ctx)
+	if err != nil {
+		return nil, err
 	}
-	out := map[string]any{"domain": s.cfg.Domain, "apps": map[string]exported{}}
+	all := map[string]exported{}
 	for _, a := range list {
 		objs, err := apps.Render(a, s.params(a, ""))
 		if err != nil {
-			fail(w, 500, "render "+a.Name+": "+err.Error(), "")
-			return
+			return nil, fmt.Errorf("render %s: %w", a.Name, err)
 		}
 		items := make([]any, 0, len(objs)+1)
 		for _, o := range objs {
@@ -239,10 +225,42 @@ func (s *Server) apiExport(w http.ResponseWriter, r *http.Request) {
 		}
 		spec := *a
 		spec.Backup, spec.Build, spec.Hooks = nil, nil, nil
-		out["apps"].(map[string]exported)[a.Name] = exported{Spec: &spec, Manifests: kube.Obj{"apiVersion": "v1", "kind": "List", "items": items}}
+		all[a.Name] = exported{Spec: &spec, Manifests: kube.Obj{"apiVersion": "v1", "kind": "List", "items": items}}
 	}
+	out := map[string]any{"domain": s.cfg.Domain, "apps": all}
 	if c, _ := s.backupConfig(ctx); c != nil {
-		out["backups"] = map[string]any{"repository": c.Repository(), "region": c.Region, "note": "restic repository; the password is shown by `sb backups password`"}
+		out["backups"] = map[string]any{"repository": c.Repository(), "region": c.Region, "note": "restic repository; the encryption password was printed by sb init and is shown in the dashboard settings"}
 	}
-	writeJSON(w, 200, out)
+	return out, nil
+}
+
+// configureBackups validates and stores the backup target. The encryption password is the
+// one installed by sb init (or kept from an earlier configuration); a new one is generated
+// only if none exists. Returns whether it was generated here.
+func (s *Server) configureBackups(ctx context.Context, c *BackupConfig, hourSet bool) (bool, error) {
+	if c.Prefix == "" {
+		c.Prefix = "slicedbread/" + s.cfg.Domain
+	}
+	if c.Region == "" {
+		c.Region = "auto"
+	}
+	if c.Hour == 0 && !hourSet {
+		c.Hour = 3
+	}
+	if err := c.validate(); err != nil {
+		return false, err
+	}
+	prev, err := s.backupSecret(ctx)
+	if err != nil {
+		return false, err
+	}
+	generated := false
+	if c.Password == "" {
+		if prev != nil && prev.Password != "" {
+			c.Password = prev.Password
+		} else {
+			c.Password, generated = newResticPassword(), true
+		}
+	}
+	return generated, s.saveBackupConfig(ctx, *c)
 }

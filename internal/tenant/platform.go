@@ -23,7 +23,6 @@ const registriesYAML = `mirrors:
 // PlatformParams fill the platform manifest.
 type PlatformParams struct {
 	Domain       string
-	AdminEmail   string
 	ControlImage string
 }
 
@@ -89,6 +88,10 @@ rules:
   - apiGroups: ["", "apps", "batch", "networking.k8s.io", "traefik.io", "postgresql.cnpg.io", "slicedbread.dev"]
     resources: ["*"]
     verbs: ["*"]
+  # Certificate status for alerts, and the ZeroSSL fallback issuer it enables after setup.
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "clusterissuers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -128,7 +131,6 @@ spec:
           ports: [{containerPort: 8080}]
           env:
             - {name: SB_DOMAIN, value: "{{.Domain}}"}
-            - {name: SB_ADMIN_EMAIL, value: "{{.AdminEmail}}"}
             - {name: SB_RAILPACK_VERSION, value: "` + RailpackVersion + `"}
             - {name: SB_REGISTRY_PULL, value: "` + RegistryPullHost + `"}
           volumeMounts: [{name: data, mountPath: /data}]

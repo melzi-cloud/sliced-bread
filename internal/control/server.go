@@ -70,6 +70,7 @@ type Server struct {
 	registryGCAt      time.Time
 	alertsAt          time.Time
 	alertsCache       []Alert
+	fallback          fallbackState
 }
 
 // New creates a server and loads or bootstraps auth state.
@@ -77,7 +78,7 @@ func New(ctx context.Context, cfg Config, k *kube.Client) (*Server, error) {
 	if cfg.Domain == "" {
 		return nil, fmt.Errorf("SB_DOMAIN is required")
 	}
-	a, err := LoadAuth(ctx, k, cfg.Namespace, cfg.Domain, cfg.AdminEmail)
+	a, err := LoadAuth(ctx, k, cfg.Namespace, cfg.Domain)
 	if err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
 	}

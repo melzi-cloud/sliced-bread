@@ -46,6 +46,8 @@ func main() {
 			os.Exit(handleExit(runUpgrade(args[1:])))
 		case "ssh":
 			os.Exit(handleExit(runSSH(args[1:])))
+		case "setup-link":
+			os.Exit(handleExit(runSetupLink(args[1:])))
 		}
 	}
 	if len(args) > 0 && args[0] == "dev" {
@@ -107,7 +109,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := p.DeployControl(ctx, st, root, adminEmail(st)); err != nil {
+		if err := p.DeployControl(ctx, st, root); err != nil {
 			return err
 		}
 		_, err = st.Kubectl(ctx, "-n sb-system rollout status deploy/sb-control --timeout=120s", nil)
@@ -190,13 +192,6 @@ func tenantCmd(ctx context.Context, p *tenant.Provisioner, args []string) error 
 	return errors.New(usage)
 }
 
-func adminEmail(st *tenant.State) string {
-	if e := os.Getenv("SB_ADMIN_EMAIL"); e != "" {
-		return e
-	}
-	return "admin@" + st.Domain
-}
-
 // prototypeUp creates a tenant with production certificates and the full platform.
 func prototypeUp(ctx context.Context, p *tenant.Provisioner, root string) error {
 	p.Cfg.ACMEServer = "https://acme-v02.api.letsencrypt.org/directory" // trusted certs for browsers and Bitwarden clients
@@ -209,10 +204,13 @@ func prototypeUp(ctx context.Context, p *tenant.Provisioner, root string) error 
 		err = p.InstallAddons(ctx, st)
 	}
 	if err == nil {
-		err = p.DeployControl(ctx, st, root, adminEmail(st))
+		err = p.DeployControl(ctx, st, root)
 	}
 	if err == nil {
 		err = p.FetchCredentials(ctx, st)
+	}
+	if err == nil {
+		err = devSetup(ctx, p, st)
 	}
 	if err != nil {
 		if st != nil && len(st.Nodes) > 0 {
@@ -226,7 +224,7 @@ func prototypeUp(ctx context.Context, p *tenant.Provisioner, root string) error 
   dashboard:   https://auth.%s   (login: %s)
   api:         https://api.%s
   agent cli:   SB_CONFIG=%s sb apps
-  admin cli:   SB_CONFIG=%s sb approvals
+  admin cli:   SB_CONFIG=%s sb approvals   (dev only: a 1-day admin token created in the dashboard)
   expires:     %s (tear down with: make tenant-down RUN=%s)
 `, st.RunID, st.Domain, filepath.Join(st.Dir, "admin-login.json"), st.Domain,
 		filepath.Join(st.Dir, "cli-agent.json"), filepath.Join(st.Dir, "cli-admin.json"),

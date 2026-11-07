@@ -28,6 +28,14 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 <label>Email<input name="email" type="email" autocomplete="username" required></label>
 <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
 <button type="submit">Sign in</button></form>
+{{else if eq .Page "setup"}}
+<h2>Set up {{.Domain}}</h2>
+<p>Create the owner account. The owner is an admin: they approve what agents ask for, manage members, backups and settings, all here in the dashboard. Agents work through the <code>sb</code> CLI and cannot do these things.</p>
+<form method="post" action="/setup"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="code" value="{{.Code}}">
+<label>Email (also used for the ZeroSSL fallback certificate account)<input name="email" type="email" value="{{.Email}}" autocomplete="username" required></label>
+<label>Password (at least 12 characters)<input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+<label>Repeat password<input name="password2" type="password" autocomplete="new-password" minlength="12" required></label>
+<button type="submit">Create owner account</button></form>
 {{else if eq .Page "invite"}}
 {{if .Done}}<p>{{.Done}}</p>{{else}}
 <h2>Join {{.Domain}}</h2>
@@ -37,7 +45,7 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 <label>Repeat password<input name="password2" type="password" autocomplete="new-password" minlength="12" required></label>
 <button type="submit">Join</button></form>{{end}}
 {{else}}
-<p class="muted">Signed in as {{.Email}} ({{.Role}}) &middot; <a href="/logout">sign out</a> &middot; <a href="/">apps</a> &middot; <a href="/approvals">approvals</a> &middot; <a href="/members">members</a></p>
+<p class="muted">Signed in as {{.Email}} ({{.Role}}) &middot; <a href="/logout">sign out</a> &middot; <a href="/">apps</a> &middot; <a href="/approvals">approvals</a> &middot; <a href="/members">members</a> &middot; <a href="/settings">settings</a></p>
 {{if eq .Page "device"}}
 <h2>Connect a CLI</h2>
 {{if .Done}}<p>{{.Done}}</p>{{else}}
@@ -53,6 +61,58 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 <td>{{if eq .State "pending"}}{{if $.CanApprove}}<form method="post" action="/approvals/{{.ID}}"><input type="hidden" name="csrf" value="{{$.CSRF}}">
 <button name="decision" value="approve">Approve</button><button name="decision" value="deny">Deny</button></form>{{else}}<span class="muted">an admin approves</span>{{end}}{{end}}</td></tr>{{end}}</table>
 {{if not .CanApprove}}<p class="muted">Members cannot approve on this install. An admin can change that on the Members page.</p>{{end}}
+{{else if eq .Page "settings"}}{{with .Settings}}
+{{if .Welcome}}<p class="ok"><b>Setup complete.</b> You are the owner of this install. Save the backup encryption password sb init printed in your password manager if you have not yet. Your agent uses the <code>sb</code> CLI (already logged in on the machine that ran sb init with an agent token; elsewhere: <code>sb login --api {{.APIURL}}</code>).</p>{{end}}
+{{if $.Done}}<p class="ok">{{$.Done}}</p>{{end}}
+<h2>Backups</h2>
+{{if .BackupsConfigured}}<p>To <code>{{.BackupTarget}}</code>, daily at {{.BackupHour}}:00 UTC, each followed by a restore test.</p>{{else}}<p class="err">Not configured: app data is not backed up.</p>{{end}}
+{{if $.IsAdmin}}
+<form method="post" action="/settings/backups"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label>S3 endpoint (https://...)<input name="endpoint" required></label><label>Bucket<input name="bucket" required></label>
+<label>Region<input name="region" value="auto"></label><label>Prefix (optional)<input name="prefix"></label>
+<label>Hour (UTC, 0-23)<input name="hour" value="3"></label>
+<label>Access key id<input name="key" autocomplete="off" required></label><label>Secret access key<input name="secret" type="password" autocomplete="off" required></label>
+<button type="submit">{{if .BackupsConfigured}}Change backup target{{else}}Set up backups{{end}}</button></form>
+<form method="post" action="/settings/backup-password"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Show the backup encryption password</button></form>
+{{if .Password}}<p>Backup encryption password: <code>{{.Password}}</code><br><span class="muted">Keep it in your password manager. If the servers are lost, it is the only way to read the backups.</span></p>{{end}}
+<h3>Restore from the backup repository</h3>
+<p class="muted">Lists every app in the backup bucket, including apps that were deleted or lived on an earlier install that used the same bucket and password.</p>
+<form method="post" action="/settings/repository"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Look in the backup repository</button></form>
+{{if .RepoLoaded}}<table>{{range .Repo}}<tr><td>{{.Name}}</td><td class="muted">{{.Snapshots}} snapshots, latest {{.LatestAt}}</td><td>{{if .Exists}}deployed{{else}}<form method="post" action="/settings/recreate"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="app" value="{{.Name}}"><button type="submit">Recreate</button></form>{{end}}</td></tr>{{end}}</table>
+{{if .RepoDeleted}}<form method="post" action="/settings/recreate"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Recreate all {{.RepoDeleted}} missing apps</button></form>{{end}}{{end}}
+{{end}}
+<h2>Alerts</h2>
+<p>Webhook: {{if .Webhook}}{{.Webhook}}{{else}}none (alerts show on the Apps page and in <code>sb alerts</code>){{end}}</p>
+{{if $.IsAdmin}}<form method="post" action="/settings/webhook"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label>Webhook URL (empty to remove)<input name="url"></label>
+<label>Format <select name="format"><option>json</option><option>slack</option><option>discord</option><option>ntfy</option></select></label>
+<button type="submit">Save webhook</button><button name="action" value="test">Send test message</button></form>{{end}}
+<h2>Certificates</h2>
+<p>{{.Fallback}}</p>
+{{if $.IsAdmin}}<form method="post" action="/settings/fallback"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Set up ZeroSSL fallback with my email</button></form>{{end}}
+{{if $.IsAdmin}}
+<h2>API tokens</h2>
+<p class="muted">Agent tokens come from <code>sb login</code> (approved here) or sb init; they cannot approve, change settings or see secrets. Admin tokens are only for automation such as CI, and always expire.</p>
+{{if .NewToken}}<p class="ok">New admin token (shown once): <code>{{.NewToken}}</code></p>{{end}}
+<table>{{range .Tokens}}<tr><td>{{.Name}}</td><td>{{.Scope}}</td><td class="muted">{{if .Owner}}by {{.Owner}}, {{end}}created {{.Created}}, expires {{.Expires}}{{if .Expired}} (expired){{end}}</td>
+<td><form method="post" action="/settings/tokens/{{.ID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Revoke</button></form></td></tr>{{end}}</table>
+<form method="post" action="/settings/tokens"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label>Name<input name="name" placeholder="e.g. github-actions deploy" required></label><label>Expires after (days, 1-90)<input name="days" value="30"></label>
+<button type="submit">Create admin token</button></form>
+<h2>Export</h2>
+<form method="post" action="/settings/export"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label><input type="checkbox" name="secrets" value="true" style="width:auto"> include secret values</label>
+<button type="submit">Download every app as Kubernetes manifests</button></form>
+{{end}}{{end}}
+{{else if eq .Page "app"}}{{with .App}}
+<h2>{{.Status.Name}}</h2>
+<p><a href="{{.Status.URL}}">{{.Status.URL}}</a> &middot; {{.Status.State}} &middot; {{.Status.Access}}</p>
+{{if .Status.Message}}<p class="muted">{{.Status.Message}}</p>{{end}}
+{{if .Status.Backups}}<p>Backups: {{.Status.Backups}}</p>{{end}}
+{{if .Result}}<h3>{{.Result.Action}}</h3><table>{{range .Result.Rows}}<tr><td>{{index . 0}}</td><td><code>{{index . 1}}</code></td></tr>{{end}}</table>{{end}}
+{{if .Actions}}<h3>Actions</h3><table>{{range .Actions}}<tr><td><b>{{.Name}}</b>{{if .AdminOnly}} <span class="muted">(admins)</span>{{end}}<br><span class="muted">{{.Description}}</span></td><td>
+<form method="post" action="/apps/{{$.App.Status.Name}}/actions/{{.Name}}"><input type="hidden" name="csrf" value="{{$.CSRF}}">{{range $k, $v := .Input}}<input name="{{$k}}" placeholder="{{$k}}: {{$v}}">{{end}}<button type="submit">Run</button></form></td></tr>{{end}}</table>{{end}}
+{{end}}
 {{else if eq .Page "members"}}
 <h2>Members</h2>
 {{if .Done}}<p>{{.Done}}</p>{{end}}
@@ -76,7 +136,7 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 {{else}}<p class="ok">No alerts.</p>{{end}}
 <h2>Apps</h2>
 {{if not .Apps}}<p>No apps yet. Ask your agent to deploy one, or run <code>sb deploy</code>.</p>{{end}}
-<table>{{if .Apps}}<tr><th>App</th><th>State</th><th>Access</th><th>Backups</th><th>Source</th></tr>{{end}}{{range .Apps}}<tr><td><a href="{{.URL}}">{{.Name}}</a></td><td>{{.State}}</td><td>{{.Access}}</td><td>{{.BackupShort}}</td><td class="muted">{{.Source}}</td></tr>{{end}}</table>
+<table>{{if .Apps}}<tr><th>App</th><th>State</th><th>Access</th><th>Backups</th><th></th><th>Source</th></tr>{{end}}{{range .Apps}}<tr><td><a href="{{.URL}}">{{.Name}}</a></td><td>{{.State}}</td><td>{{.Access}}</td><td>{{.BackupShort}}</td><td><a href="/apps/{{.Name}}">details</a></td><td class="muted">{{.Source}}</td></tr>{{end}}</table>
 {{if .Pending}}<p><a href="/approvals">{{.Pending}} approval(s) waiting</a></p>{{end}}
 {{end}}{{end}}
 </body></html>`))
@@ -93,6 +153,8 @@ type pageData struct {
 	MembersCanApprove            bool
 	Members                      []Member
 	Invites                      []PendingInvite
+	Settings                     *settingsView
+	App                          *appView
 }
 
 func (s *Server) render(w http.ResponseWriter, d pageData) {
@@ -110,8 +172,15 @@ func (s *Server) render(w http.ResponseWriter, d pageData) {
 
 func (s *Server) uiMux() http.Handler {
 	m := http.NewServeMux()
+	s.adminRoutes(m)
+	m.HandleFunc("GET /setup", s.handleSetupGet)
+	m.HandleFunc("POST /setup", s.handleSetupPost)
 	m.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
 		rd := r.URL.Query().Get("rd")
+		if !s.auth.HasUsers() {
+			s.render(w, pageData{Page: "login", Error: "This install is not set up yet. Open the setup link sb init printed, or on that machine run: sb setup-link <install>", CSRF: s.csrf(w, r)})
+			return
+		}
 		if email, ok := s.auth.SessionFromRequest(r); ok {
 			// Already signed in on the auth host: hand the app host its own session.
 			http.Redirect(w, r, s.afterLogin(email, rd), http.StatusFound)

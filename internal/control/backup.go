@@ -65,7 +65,18 @@ func (c BackupConfig) validate() error {
 	return nil
 }
 
+// backupConfig returns the backup target, or nil when no bucket is configured
+// (the secret can exist with only the encryption password sb init installed).
 func (s *Server) backupConfig(ctx context.Context) (*BackupConfig, error) {
+	c, err := s.backupSecret(ctx)
+	if err != nil || c == nil || c.Endpoint == "" || c.Bucket == "" {
+		return nil, err
+	}
+	return c, nil
+}
+
+// backupSecret returns whatever the backup secret holds, including just the password.
+func (s *Server) backupSecret(ctx context.Context) (*BackupConfig, error) {
 	var sec kube.Obj
 	if err := s.kube.Get(ctx, "v1", "Secret", s.cfg.Namespace, backupSecret, &sec); err != nil {
 		if kube.IsNotFound(err) {

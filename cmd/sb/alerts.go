@@ -7,38 +7,8 @@ import (
 )
 
 func (c *client) runAlerts(fs *flag.FlagSet, rest []string, jsonOut *bool) error {
-	if len(rest) > 0 && rest[0] == "test" {
-		b, _, err := c.call("POST", "/v1/alerts/test", nil)
-		if err != nil {
-			return err
-		}
-		if *jsonOut {
-			c.print(b)
-		} else {
-			fmt.Println("test message sent")
-		}
-		return nil
-	}
-	if len(rest) > 0 && rest[0] == "configure" {
-		hook := fs.String("webhook", "", "")
-		format := fs.String("format", "json", "")
-		off := fs.Bool("off", false, "")
-		if _, err := parse(fs, rest[1:]); err != nil {
-			return err
-		}
-		if !*off && *hook == "" {
-			return &exitErr{exitUsage, "usage: sb alerts configure --webhook <url> [--format json|slack|discord|ntfy] | --off"}
-		}
-		body := map[string]string{"url": *hook, "format": *format}
-		if *off {
-			body["url"] = ""
-		}
-		b, _, err := c.call("PUT", "/v1/alerts/webhook", body)
-		if err != nil {
-			return err
-		}
-		c.print(b)
-		return nil
+	if len(rest) > 0 && (rest[0] == "test" || rest[0] == "configure") {
+		return c.humanOnly("Alert webhook settings", "/settings")
 	}
 	if _, err := parse(fs, rest); err != nil {
 		return err

@@ -16,11 +16,16 @@ export CLOUDFLARE_API_TOKEN=...               # Cloudflare: Zone / DNS / Edit on
 export SB_BACKUP_ACCESS_KEY_ID=...            # optional: S3 keys for backups
 export SB_BACKUP_SECRET_ACCESS_KEY=...
 
-bin/sb init --domain apps.example.com --email you@example.com --size 1 \
+bin/sb init --domain apps.example.com --size 1 \
   --backup-endpoint https://<account>.r2.cloudflarestorage.com --backup-bucket my-backups
 ```
 
-`sb init` runs from your machine and takes 5 to 10 minutes. It creates the servers, firewall, DNS records, a wildcard certificate from Let's Encrypt (add `--fallback-issuer zerossl` to fall back to ZeroSSL, which uses your `--email`) and the control plane, then logs the CLI in with an admin token. It also creates an agent token (`cli-agent.json` in the install directory) for coding agents: with it, exposure changes, deletes and restores wait for your approval. It prints where it saved the dashboard login and the backup encryption password. Keep the password somewhere safe: without it the backups cannot be read.
+`sb init` runs from your machine and takes 5 to 10 minutes. It creates the servers, firewall, DNS records, a wildcard certificate from Let's Encrypt and the control plane. At the end it prints:
+
+1. **A one-time setup link.** Open it and create your owner account (email and password). Your email also sets up ZeroSSL as a fallback certificate authority. If the link expires, `sb setup-link <install>` prints a new one.
+2. **The backup encryption password.** Save it in your password manager. Backups are encrypted with it, and if the servers are ever lost it is the only way to read them. It is not stored on your machine.
+
+**Humans use the dashboard, agents use the CLI.** The dashboard at `https://auth.apps.example.com` is where you approve what agents ask for, invite teammates, set up backups, restore, configure alerts and export. The CLI is left logged in with an agent token: deploys and configuration go through, but making apps public, deleting and restoring wait for your approval, so you and your coding agent can safely share it.
 
 Then:
 
@@ -32,9 +37,9 @@ bin/sb action analytics create_website --input name=MyApp --input domain=myapp.a
 bin/sb backups
 ```
 
-To let a coding agent operate it, give it [skill/SKILL.md](skill/SKILL.md) and have it run `sb login --api https://api.apps.example.com`. You approve that login in the browser, and the agent gets a token that cannot widen access, delete apps or restore data without your approval.
+To let a coding agent operate it, give it [skill/SKILL.md](skill/SKILL.md). On the machine that ran `sb init` it can use the CLI as is; elsewhere it runs `sb login --api https://api.apps.example.com` and you approve that login in the dashboard. No CLI token can approve, change settings or see secrets. For automation such as CI, an admin can create an expiring admin token on the dashboard's Settings page.
 
-Other commands: `sb installs`, `sb upgrade <install>`, `sb ssh <install>` (SSH is only open to the IP address `sb init` ran from), `sb export <dir>`, `sb destroy <install>`.
+Other commands: `sb installs`, `sb upgrade <install>`, `sb setup-link <install>`, `sb ssh <install>` (SSH is only open to the IP address `sb init` ran from), `sb destroy <install>`.
 
 ## Sizes and cost
 
@@ -51,12 +56,12 @@ Backup storage is billed by your S3 provider. Restic deduplicates and compresses
 ## What it does today
 
 - **Deploy anything:** a catalog template (Vaultwarden, Umami), any container image, a public git repo, or a local directory such as a Lovable export, built in the cluster with Railpack or its Dockerfile.
-- **Your team, your rules:** invite teammates as members or admins with `sb members invite`. Members get past the login wall; whether they can also approve risky changes is an admin setting (off by default).
+- **Your team, your rules:** invite teammates as members or admins on the dashboard. Members get past the login wall; whether they can also approve risky changes is an admin setting (off by default).
 - **Private by default:** every app sits behind a login wall unless you say otherwise. Apps with their own clients (Vaultwarden) opt out. Session cookies are host-only and never reach apps.
 - **Backups that are proven:** daily restic backups of volumes and Postgres to your bucket, each followed by a restore test into a scratch namespace: restic verifies every restored file's content, the file count must match, required files must be present (Vaultwarden's database), and a database dump must load into a fresh Postgres with the same tables. `sb restore` replaces an app's data with a snapshot, and `sb restore <app> --recreate` brings back a deleted app (spec, secrets, source and data) from the bucket alone.
 - **Tells you when something breaks:** failed backups or restore tests, apps that stay down, certificates that don't renew and servers that disappear show on the dashboard and in `sb alerts`, and can be posted to a webhook (Slack, Discord, ntfy or JSON) when they open and when they clear.
 - **Agent-friendly:** a CLI with JSON output and documented exit codes, a skill file, and human approvals for anything that widens exposure, deletes or restores.
-- **Your account, your keys:** certificates are issued and kept inside your cluster, and traffic never passes through us. `sb export` writes every app as plain Kubernetes manifests.
+- **Your account, your keys:** certificates are issued and kept inside your cluster, and traffic never passes through us. The dashboard exports every app as plain Kubernetes manifests.
 
 ## Known gaps
 
