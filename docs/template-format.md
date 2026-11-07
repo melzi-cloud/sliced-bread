@@ -1,33 +1,34 @@
-# Template format v1 (draft for review)
+# Template format v1
 
-Status: proposal, not implemented. Replaces the Go templates in `internal/apps/catalog.go` and the Go actions in `internal/control/hooks.go` once agreed. Decisions it builds on: D-029 (actions are container jobs, multi-component apps come with the format) and D-030 (agents never see or write secret values).
+Status: proposed for sign-off (2026-11-07), not implemented. Replaces the Go templates in `internal/apps/catalog.go` and the Go actions in `internal/control/hooks.go`. Builds on D-029 (actions are container jobs, multi-component apps come with the format) and D-030 (agents never see or write secret values).
 
 ## Goals
 
 - A template is data, not code in sb-control. An agent or a contributor can write one, and CI can judge it (`verify.yaml`, task #13).
 - One app can have several components (a web server, a worker, a cache), each with replicas, config files and routes.
-- Everything an agent needs to operate the app is declared: settings it may change, actions it may run, what needs human approval, which values are secret.
+- Everything an agent needs to operate the app is declared: settings it may change, actions it may run, what needs human approval, which values are secret, and what the human still has to do to finish setting the app up.
 - Secrets never reach the agent. Generated secrets come from sb-control's random number generator.
+- Prefer states over timers: nothing in a template depends on a human coming back within a time window.
 
-Not in v1: arbitrary Kubernetes objects, privileged containers, host paths, several databases per app, non-HTTP ports exposed to the internet.
+Not in v1: extra hostnames per app (task #43), arbitrary Kubernetes objects, privileged containers, host paths, several databases per app, non-HTTP ports exposed to the internet, autoscaling (task #29).
 
 ## Layout
 
-Templates live in the `melzi-cloud/bakery` repository, one directory each:
+Templates live in `melzi-cloud/bakery`, one directory each:
 
 ```
 bakery/
   umami/
     template.yaml        the template
-    actions/             scripts for actions (one file per action)
+    actions/             one script per action
       create-website.sh
-      stats.sh
       set-admin-password.sh
+    files/               config file templates (if any)
     verify.yaml          what CI checks (task #13)
     README.md            for humans browsing the catalog
 ```
 
-`template.yaml` is the only file sb-control reads at deploy time. Action scripts are bundled into the published index with their content hash.
+CI builds a signed index of all templates (minisign, task #16): names, versions, image digests and the content hash of every file. sb-control only deploys templates whose files match the index.
 
 ## Top-level fields
 
@@ -35,24 +36,25 @@ bakery/
 |---|---|---|
 | `apiVersion` | yes | `bakery.slicedbread.dev/v1` |
 | `name` | yes | lowercase, also the default app name |
-| `version` | yes | the template's own version (semver). Bumped on any change; `sb update` (task #17) moves apps between versions |
+| `version` | yes | the template's own semver, bumped on any change; `sb update` (task #17) moves apps between versions |
 | `description` | yes | one sentence for `sb catalog` |
 | `upstream` | yes | `project`, `url`, `licence`, and `adaptedFrom` when based on a Coolify or Dokploy template (with its licence) |
-| `access` | yes | `mode: wall \| app-auth \| public` and `publicPaths` (paths that skip the login wall even in `wall` mode) |
-| `components` | yes | the containers, see below |
+| `access` | yes | default access, see below |
+| `components` | yes | the containers |
 | `routes` | no | which component serves which path; default: everything to the first component |
 | `database` | no | `postgres: {version: "17"}` gives the app one CloudNativePG database |
 | `secrets` | no | generated secrets and secrets a human provides |
-| `settings` | no | typed options an agent may change, mapped to env |
-| `forbidEnv` | no | env keys users and agents may not set (they are managed by settings or would weaken the app) |
+| `settings` | no | typed options an agent may change |
+| `forbidEnv` | no | env keys users and agents may not set |
 | `backup` | no | how to back up volumes consistently |
-| `actions` | no | operations agents (or humans) can run |
+| `actions` | no | operations agents or humans can run, and install steps |
+| `setup` | no | what the human still has to do, shown on the dashboard until done |
 | `notes` | no | guidance for agents, shown by `sb status` |
-| `requires` | no | `sb: ">=0.4"`, the oldest sb-control that understands this template |
+| `requires` | no | `sb: ">=0.4"`, the oldest sb-control that understands the template |
 
-### Values and references
+### References
 
-Env values and config files may use references, resolved by sb-control when it renders the app:
+Env values and config files may use references, resolved when sb-control renders the app:
 
 | Reference | Value |
 |---|---|
@@ -61,31 +63,40 @@ Env values and config files may use references, resolved by sb-control when it r
 | `${secret.NAME}` | a secret's value (generated or human-provided) |
 | `${setting.NAME}` | a setting's current value |
 | `${component.NAME.internal}` | `http://<component>.<app-namespace>.svc.cluster.local:<port>` |
-| `${apps.OTHER.url}` / `${apps.OTHER.internal}` | another app's URLs (as today) |
+| `${apps.OTHER.url}` / `${apps.OTHER.internal}` | another app's URLs |
+
+## access
+
+```yaml
+access:
+  mode: app-auth          # wall | app-auth | public: the default for new apps
+  publicPaths: [/script.js, /api/send]           # skip the login wall even in wall mode
+  wallPaths: [/identity/accounts/register]       # need the login wall even in app-auth or public mode
+```
+
+`mode` is a default. If the user later narrows access (for example to `wall`), that choice is kept across settings changes and template updates; widening it needs approval as today. Paths match by prefix. `wallPaths` lets an app stay reachable for its own clients while a sensitive part (registration, an admin page) stays team-only.
 
 ## components
 
 ```yaml
 components:
-  - name: web                 # first component gets the app's host by default
-    image: ghcr.io/umami-software/umami:3.4.1@sha256:…   # tag for humans, digest is what runs
+  - name: web                 # the first component gets the app's host by default
+    image: ghcr.io/umami-software/umami:3.4.1@sha256:…   # tag for humans; digest required
     port: 3000
     health: {path: /api/heartbeat}
-    replicas: 1               # fixed; components with a ReadWriteOnce volume must stay at 1
+    replicas: 1               # fixed; 1 for components with a ReadWriteOnce volume
     resources: {cpu: 100m, memory: 256Mi}   # real numbers, checked by verify
     env:
       DATABASE_URL: ${db.url}
-      APP_SECRET: ${secret.APP_SECRET}
     volumes:
       - {name: data, path: /data, size: 10Gi}
-    files:                    # config files mounted read-only
-      - path: /config/config.yml
-        template: files/config.yml   # rendered with the references above
-    command: [...]            # optional, overrides the image's
+    files:                    # config files, mounted read-only
+      - {path: /config/config.yml, template: files/config.yml}
+    command: [...]            # optional
     runAsUser: 1000           # optional; default is the image's user
 ```
 
-Components without a port are workers (no Service). Every component gets the same hardening as apps today: no service account token, privilege escalation off, capabilities dropped, Pod Security baseline. A component reaches another one with `${component.NAME.internal}`; the app's network policy already allows traffic inside the app.
+Components without a port are workers. Every component gets today's hardening: no service account token, privilege escalation off, capabilities dropped, Pod Security baseline. Components reach each other with `${component.NAME.internal}`.
 
 ### routes
 
@@ -95,54 +106,46 @@ routes:
   - {path: /api/v1/stream, to: companion}
 ```
 
-All routes are on the app's host. Paths not listed go to the first component. Extra hosts (for example `api.<app>.<domain>`) are left for v2 unless a launch template needs them.
+All routes are on the app's host. Unlisted paths go to the first component.
 
 ## secrets
 
 ```yaml
 secrets:
   generate:                   # created once by sb-control's random number generator
-    - {name: APP_SECRET, bytes: 32, format: hex}
-    - {name: UMAMI_ADMIN_PASSWORD, bytes: 24, format: alnum}
-  provide:                    # entered by a human in the dashboard (secret request link)
-    - {name: SMTP_PASSWORD, description: "Password of the mail account used for invitations", required: false}
+    - {name: APP_SECRET, bytes: 32, format: hex}      # format: hex | base64 | alnum
+  provide:                    # entered by a human in the dashboard
+    - {name: SMTP_PASSWORD, description: "Password of the mail account for invitations", required: false}
 ```
 
-Agents only ever see secret names. `sb env generate <app> KEY` does the same for apps not built from a template.
+Agents only ever see secret names. A missing required `provide` secret shows as a setup step with a dashboard link. `sb env generate <app> KEY` generates a secret for apps not built from a template.
 
 ## settings
 
 ```yaml
 settings:
-  - name: signups
-    description: Allow new accounts to register.
-    values: ["false", "true"]        # or `type: string` (optional `pattern`), `type: number`, `type: boolean`
-    default: "false"
-    approvalFor: ["true"]            # an agent setting this value waits for a human
-    autoRevert: {after: 15m, to: "false"}   # sb-control turns it back by itself
-    env:
-      SIGNUPS_ALLOWED: ${setting.signups}
   - name: signup_domain
-    description: Only allow signups with email addresses at this domain (empty: any).
-    type: string
+    description: Only allow accounts with email addresses at this domain (empty: any).
+    type: string               # enum (`values: [...]`), string (optional `pattern`), number, boolean
     pattern: '^([a-z0-9-]+\.)+[a-z]{2,}$'
     default: ""
+    approvalFor: []            # values that make an agent's change wait for a human
     env:
       SIGNUPS_DOMAINS_WHITELIST: ${setting.signup_domain}
 ```
 
-`autoRevert` replaces the Go code that closes Vaultwarden signups today; it is the one timer sb-control keeps running for templates.
+Numbers take optional `min` and `max`. A setting change re-renders the app; it never resets the access mode the user chose.
 
 ## backup
 
 ```yaml
 backup:
-  consistency: stop          # live (default): copy while running; stop: stop the app first (SQLite)
-  require: [data/db.sqlite3] # restore tests fail if these are missing or empty
+  consistency: stop          # live (default) or stop (stop the app while copying, e.g. SQLite)
+  require: [data/db.sqlite3] # restore tests fail if missing or empty
   exclude: [data/icon_cache]
 ```
 
-The database is always backed up with `pg_dump` and restore-tested. Volumes are backed up unless excluded.
+The database is always backed up with `pg_dump` and restore-tested; volumes unless excluded.
 
 ## actions
 
@@ -152,7 +155,7 @@ An action is a script that runs as a Job next to the app (D-029).
 actions:
   - name: create_website
     description: Register a website and return the tracking snippet for its <head>.
-    image: ghcr.io/melzi-cloud/bakery-runtime:1.0.0@sha256:…   # sh, curl, jq
+    image: ghcr.io/melzi-cloud/bakery-runtime:1.0.0@sha256:…   # every action names its image
     run: actions/create-website.sh
     secrets: [UMAMI_ADMIN_PASSWORD]     # the only secrets the job receives
     input:
@@ -161,46 +164,97 @@ actions:
     output:
       website_id: {type: string}
       snippet: {type: string}
-      next: {type: string}
   - name: dashboard_login
-    description: The Umami dashboard username and password.
+    image: ghcr.io/melzi-cloud/bakery-runtime:1.0.0@sha256:…
     run: actions/dashboard-login.sh
     secrets: [UMAMI_ADMIN_PASSWORD]
     output:
       username: {type: string}
       password: {type: string, secret: true}   # only shown to a signed-in human in the dashboard
   - name: set_admin_password
-    description: Replace Umami's default admin password with the generated one.
-    on: install                          # runs by itself once the app is first healthy
+    on: install                          # runs once the app is first healthy; blocks until it succeeds
+    image: ghcr.io/melzi-cloud/bakery-runtime:1.0.0@sha256:…
     run: actions/set-admin-password.sh
     secrets: [UMAMI_ADMIN_PASSWORD]
 ```
 
 **How an action runs:**
-- **Image:** every action names its image (`image:`), for example the app's own image when the action needs its CLI, or a Postgres image for `psql`. We publish a small runtime image (`sh`, `curl`, `jq`, CA certificates) that actions can choose.
-- **Environment:** `SB_APP_INTERNAL` (the first component's internal URL), `SB_APP_URL`, each input as `SB_INPUT_<NAME>`, and only the declared secrets.
-- **Network:** the job can reach the app and DNS, nothing else, unless the action lists `egress: [hosts]`.
-- **Result:** the script prints one JSON object as its last line; sb-control checks it against `output`. A non-zero exit fails the action with the script's last stderr line as the message. Time limit 60 seconds unless `timeout:` says otherwise.
-- **Secrets in results:** any secret value of the app found in the output or the error is replaced with `[secret]` before anything is returned. Fields marked `secret: true` are never returned to the API; an agent gets a link for the human instead (D-030).
-- **Triggers:** `on: install` (once, the app shows `configuring` until it succeeds, retried with backoff), `on: upgrade` (after `sb update`, task #17), or manual (default). `approval: true` makes an agent's call wait for a human.
+- **Image:** every action names one, pinned by digest: the app's own image when the action needs its CLI, a Postgres image for `psql`, or the published runtime image (`sh`, `curl`, `jq`).
+- **Environment:** `SB_APP_INTERNAL` (the first component's internal URL), `SB_APP_URL`, each input as `SB_INPUT_<NAME>`, `SB_DB_URL` if the action lists `database: true`, and only the declared secrets.
+- **Volumes:** `volumes: [data]` mounts the app's volume read-only (the job runs on the app's server).
+- **Network:** the job reaches the app, its database and DNS only, unless the action lists `egress: [hosts]`.
+- **Result:** the script prints one JSON object as its last line, checked against `output`. A non-zero exit fails the action with the last stderr line as the message. Time limit 60 seconds unless `timeout:` says otherwise.
+- **Secrets in results:** any secret value of the app in the output or error is replaced with `[secret]`. Fields marked `secret: true` never go to the API; an agent gets a dashboard link for the human instead (D-030).
+- **Triggers:** `on: install` blocks: the app shows `configuring` until it succeeds (retried with backoff, error shown in `sb status`). `on: upgrade` runs after `sb update` (task #17). Default is manual. `approval: true` makes an agent's call wait for a human.
 
-Example script (`actions/create-website.sh`):
+## setup
 
-```sh
-set -eu
-tok=$(curl -fsS "$SB_APP_INTERNAL/api/auth/login" -H 'content-type: application/json' \
-  -d "{\"username\":\"admin\",\"password\":\"$UMAMI_ADMIN_PASSWORD\"}" | jq -r .token)
-site=$(curl -fsS "$SB_APP_INTERNAL/api/websites" -H "authorization: Bearer $tok" \
-  -H 'content-type: application/json' \
-  -d "$(jq -n --arg n "$SB_INPUT_NAME" --arg d "$SB_INPUT_DOMAIN" '{name:$n,domain:$d}')")
-id=$(echo "$site" | jq -r .id)
-jq -cn --arg id "$id" --arg url "$SB_APP_URL/script.js" '{
-  website_id: $id,
-  snippet: "<script defer src=\"\($url)\" data-website-id=\"\($id)\"></script>",
-  next: "Add the snippet inside <head> of the site, then redeploy that app."}'
+Steps the human has to do after deploying, with a way to tell when each is done. The dashboard shows open steps on the app page and the Apps list; `sb status` shows them to agents. A step disappears by itself when its check passes: no timers, no "finish" button.
+
+```yaml
+setup:
+  - name: first_account
+    description: Create your Vaultwarden account.
+    link: /#/signup              # opened through the login wall first, so wallPaths work
+    doneWhen: has_account        # an action returning {"done": true}; checked every few minutes until done
 ```
 
+The link goes through `https://<app>.<domain>/__sb/enter?to=/#/signup`: sb-control asks for the login wall (setting the app host's session cookie), then redirects. This is what lets the browser pass `wallPaths` on an app that is otherwise `app-auth`.
+
 ## Full examples
+
+### Vaultwarden
+
+Registration is team-only, permanently: signups are on inside Vaultwarden, but the registration endpoints need the login wall, so only members of the install can create an account. Bitwarden apps and extensions still log in without the wall. Verified on Vaultwarden 1.37.5 (web vault 2026.10.1, 2026-11-07): the web vault registers through `/identity/accounts/register/send-verification-email` and `/identity/accounts/register/finish`; a browser that passed the wall created an account; without a session all registration endpoints, including the older `/api/accounts/register`, answered 401.
+
+```yaml
+apiVersion: bakery.slicedbread.dev/v1
+name: vaultwarden
+version: 1.0.0
+description: Password manager compatible with Bitwarden apps and browser extensions.
+upstream: {project: Vaultwarden, url: https://github.com/dani-garcia/vaultwarden, licence: AGPL-3.0}
+access:
+  mode: app-auth               # Bitwarden clients cannot pass the login wall
+  wallPaths: [/identity/accounts/register, /api/accounts/register]
+components:
+  - name: web
+    image: vaultwarden/server:1.37.5@sha256:…
+    port: 8080
+    health: {path: /alive}
+    resources: {cpu: 50m, memory: 128Mi}
+    env:
+      ROCKET_PORT: "8080"
+      DOMAIN: ${app.url}
+      SIGNUPS_ALLOWED: "true"   # safe: registration is behind the login wall
+      INVITATIONS_ALLOWED: "false"
+      SHOW_PASSWORD_HINT: "false"
+      DATABASE_CONN_INIT: "PRAGMA busy_timeout = 5000; PRAGMA synchronous = FULL;"
+    volumes: [{name: data, path: /data, size: 10Gi}]
+settings:
+  - name: signup_domain
+    description: Only allow accounts with email addresses at this domain (empty: any member of the install).
+    type: string
+    default: ""
+    env: {SIGNUPS_DOMAINS_WHITELIST: "${setting.signup_domain}"}
+forbidEnv: [ADMIN_TOKEN, SIGNUPS_ALLOWED, SIGNUPS_DOMAINS_WHITELIST]
+backup: {consistency: stop, require: [data/db.sqlite3]}
+actions:
+  - name: has_account
+    description: Whether at least one account exists.
+    image: docker.io/keinos/sqlite3:3.54.1@sha256:…
+    volumes: [data]
+    run: actions/has-account.sh       # sqlite3 -readonly /data/db.sqlite3 'select count(*) from users'
+    output: {done: {type: boolean}, accounts: {type: number}}
+setup:
+  - name: first_account
+    description: Create your Vaultwarden account (members of this install can create one at any time).
+    link: /#/signup
+    doneWhen: has_account
+notes: |
+  Only members of this install can create accounts: give them the account link from `sb status`
+  (it passes the login wall first). Clients: in the Bitwarden app or extension choose Self-hosted
+  and enter the app URL.
+```
 
 ### Umami
 
@@ -227,40 +281,24 @@ secrets:
   generate:
     - {name: APP_SECRET, bytes: 32, format: hex}
     - {name: UMAMI_ADMIN_PASSWORD, bytes: 24, format: alnum}
-actions: [set_admin_password (on install), create_website, test_event, stats, dashboard_login]  # as above
+actions: [set_admin_password (on install), create_website, test_event, stats, dashboard_login]   # as in the actions section
 notes: |
   The dashboard sits behind the login wall and has its own Umami login (dashboard_login, shown to humans).
   Use create_website to get a snippet; verify with test_event and read counts with stats.
 ```
 
-### Vaultwarden
+Example action script (`actions/create-website.sh`):
 
-```yaml
-apiVersion: bakery.slicedbread.dev/v1
-name: vaultwarden
-version: 1.0.0
-description: Password manager compatible with Bitwarden apps and browser extensions.
-upstream: {project: Vaultwarden, url: https://github.com/dani-garcia/vaultwarden, licence: AGPL-3.0}
-access: {mode: app-auth}     # Bitwarden clients cannot pass the login wall
-components:
-  - name: web
-    image: vaultwarden/server:1.37.5@sha256:…
-    port: 8080
-    health: {path: /alive}
-    resources: {cpu: 50m, memory: 128Mi}
-    env:
-      ROCKET_PORT: "8080"
-      DOMAIN: ${app.url}
-      INVITATIONS_ALLOWED: "false"
-      SHOW_PASSWORD_HINT: "false"
-      DATABASE_CONN_INIT: "PRAGMA busy_timeout = 5000; PRAGMA synchronous = FULL;"
-    volumes: [{name: data, path: /data, size: 10Gi}]
-settings: [signups, signup_domain]   # as in the settings section
-forbidEnv: [ADMIN_TOKEN, SIGNUPS_ALLOWED, SIGNUPS_DOMAINS_WHITELIST]
-backup: {consistency: stop, require: [data/db.sqlite3]}
-notes: |
-  Signups are off by default. To create the first account: set signups=true (needs approval),
-  the user registers at the app URL; signups close by themselves after 15 minutes.
+```sh
+set -eu
+tok=$(curl -fsS "$SB_APP_INTERNAL/api/auth/login" -H 'content-type: application/json' \
+  -d "$(jq -n --arg p "$UMAMI_ADMIN_PASSWORD" '{username:"admin",password:$p}')" | jq -r .token)
+site=$(curl -fsS "$SB_APP_INTERNAL/api/websites" -H "authorization: Bearer $tok" \
+  -H 'content-type: application/json' \
+  -d "$(jq -n --arg n "$SB_INPUT_NAME" --arg d "$SB_INPUT_DOMAIN" '{name:$n,domain:$d}')")
+id=$(echo "$site" | jq -r .id)
+jq -cn --arg id "$id" --arg url "$SB_APP_URL/script.js" \
+  '{website_id: $id, snippet: "<script defer src=\"\($url)\" data-website-id=\"\($id)\"></script>"}'
 ```
 
 ### Multi-component sketch: Invidious
@@ -274,7 +312,7 @@ components:
   - name: companion
     image: quay.io/invidious/invidious-companion:…@sha256:…
     port: 8282
-    env: {SERVER_SECRET_KEY: ${secret.COMPANION_KEY}}
+    env: {SERVER_SECRET_KEY: "${secret.COMPANION_KEY}"}
 routes:
   - {path: /, to: web}
   - {path: /latest_version, to: companion}
@@ -284,20 +322,20 @@ secrets:
   generate: [{name: COMPANION_KEY, bytes: 16, format: alnum}, {name: HMAC_KEY, bytes: 32, format: hex}]
 ```
 
-## What stays in sb-control
+## What sb-control does
 
-- Rendering components, routes, the database and network policies (as today, generalised to several components).
-- Generating secrets, masking outputs, the dashboard pages for secret requests and secret outputs.
-- Running actions as Jobs and checking their output.
-- `autoRevert` timers.
+- Renders components, routes, the database, `publicPaths` and `wallPaths`, and network policies.
+- Generates secrets, collects provided ones through the dashboard, masks action output.
+- Runs actions as Jobs, checks their output, runs `on: install` actions and `setup` checks.
+- Serves `/__sb/enter` on app hosts.
 
-## Review decisions (Antonio, 2026-11-07)
+## Decisions taken in review (Antonio, 2026-11-07)
 
-1. **Images by digest:** required in every template.
-2. **Action images:** each action names its own image (for example a Postgres image for an action that needs `psql`). A small runtime image with `sh`, `curl` and `jq` is published as a convenience, not a default.
-3. **Extra hosts:** explained; lean is to leave them for v2 (no launch template needs one). Open.
-4. **Install actions block:** the app shows `configuring` until its `on: install` actions succeed.
-5. **Settings types:** enum (`values`), string (optional `pattern`), number and boolean.
-6. **Replicas:** fixed numbers only; autoscaling later (task #29).
-
-Under discussion: replacing Vaultwarden's time-based signup window with team-only registration (registration paths behind the login wall), which would add `wallPaths` to `access`.
+1. Images are pinned by digest in every template.
+2. Every action names its own image; a small runtime image is published as a convenience.
+3. Extra hostnames per app are not in v1 (task #43).
+4. `on: install` actions block: the app is `configuring` until they succeed.
+5. Settings types: enum, string (with optional pattern), number, boolean.
+6. Replicas are fixed numbers; autoscaling later.
+7. No time-based behaviour: Vaultwarden's 15-minute signup window is replaced by team-only registration (`wallPaths`) and a setup step that completes itself.
+8. The index is signed with minisign.
