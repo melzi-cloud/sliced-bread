@@ -45,7 +45,7 @@ Unchanged from the current design:
 - Apps at `<app>.<base domain>`. One wildcard certificate per tenant, issued in the cluster by cert-manager with Cloudflare DNS-01.
 - Private keys never leave the user's cluster. Traffic never passes through us.
 - Rate limits are not a concern: each user has their own registered domain.
-- **Add a fallback issuer.** Let's Encrypt first, then ZeroSSL or Google Trust Services (both free ACME, both need an external account binding key). Separate rate limits and no single point of failure.
+- **Add a fallback issuer.** Let's Encrypt first, then ZeroSSL (free ACME, needs an external account binding key). Separate rate limits and no single point of failure.
 
 ### Hosted by us: we terminate TLS at a shared edge
 
@@ -70,7 +70,7 @@ These cost little now and avoid a rewrite later:
 2. **Login wall that works with host-only cookies.** In hosted mode there is no tenant-level parent domain to scope a tenant-wide cookie to. Sign in on the auth host, then hand each app host a signed one-time token that it exchanges for its own host-only session cookie. Use the same flow in self-hosted mode: one code path, and better isolation between apps. Together with the cookie hardening in `TODO.md` item 5.
 3. **Trust forwarding headers only from the edge.** In hosted mode, Traefik should accept `X-Forwarded-For` and `X-Forwarded-Proto` only from edge IP ranges, and the origin should refuse direct traffic (allow-list or Cloudflare authenticated origin pulls). Hetzner Cloud Firewalls cannot be attached to load balancers, so this has to happen at Traefik or by using a tunnel.
 4. **Uploads not limited to 100 MB.** Either keep the API host outside the proxy (DNS only) or make `sb deploy --dir` uploads chunked.
-5. **Issuer fallback** (ZeroSSL or Google Trust Services) as a second cert-manager issuer, with the EAB key stored as a secret.
+5. **Issuer fallback** (ZeroSSL) as a second cert-manager issuer, with the EAB key stored as a secret.
 6. Keep user content on a domain separate from the console (already D-007).
 
 ## First release checklist (self-hosted)

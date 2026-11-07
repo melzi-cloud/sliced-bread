@@ -43,7 +43,7 @@ type Dev struct {
 	Fallback *EAB   // optional second ACME issuer
 }
 
-// EAB is an ACME external account binding for a fallback issuer (ZeroSSL or Google Trust Services).
+// EAB is an ACME external account binding for the fallback issuer (ZeroSSL).
 type EAB struct {
 	Server string
 	KeyID  string
@@ -53,7 +53,6 @@ type EAB struct {
 // FallbackServers maps issuer names to ACME directories.
 var FallbackServers = map[string]string{
 	"zerossl": "https://acme.zerossl.com/v2/DV90",
-	"google":  "https://dv.acme-v02.api.pki.goog/directory",
 }
 
 // LetsEncryptProduction is the production ACME directory.

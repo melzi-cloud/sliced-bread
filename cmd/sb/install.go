@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -76,14 +77,15 @@ func baseConfig(hc, cf string) config.Dev {
 }
 
 const initUsage = `sb init --domain <base domain> --email <admin email> [--size 1|3] [--location nbg1] [--server-type cx23]
-        [--fallback-issuer zerossl|google] [--yes]
+        [--fallback-issuer zerossl] [--yes]
         [--backup-endpoint https://... --backup-bucket B [--backup-region auto] [--backup-prefix path]]
 
 Creates a SlicedBread install in your own Hetzner account. Apps are served at https://<app>.<base domain>.
 Secrets (read from the environment, or prompted for on a terminal):
   HCLOUD_TOKEN           Hetzner Cloud API token (read and write). Use a dedicated Hetzner project.
   CLOUDFLARE_API_TOKEN   Cloudflare token with Zone / DNS / Edit on the zone that contains the base domain.
-  SB_EAB_KID, SB_EAB_HMAC  external account binding for --fallback-issuer (optional).
+  SB_EAB_KID, SB_EAB_HMAC  ZeroSSL external account binding for --fallback-issuer (optional: without them
+                         sb init requests one from ZeroSSL with the --email address).
   SB_BACKUP_ACCESS_KEY_ID, SB_BACKUP_SECRET_ACCESS_KEY  S3 keys for --backup-bucket (recommended: a bucket
                          in another location, e.g. Cloudflare R2 or Hetzner Object Storage).
 Sizes (Hetzner prices incl. VAT, nbg1, cx23): 1 node about EUR 7/month (no high availability); 3 nodes plus a
@@ -134,12 +136,15 @@ func runInit(args []string) error {
 	if *fallback != "" {
 		server, ok := config.FallbackServers[*fallback]
 		if !ok {
-			return &exitErr{exitUsage, "--fallback-issuer must be zerossl or google"}
+			return &exitErr{exitUsage, "--fallback-issuer must be zerossl"}
 		}
-		kid, kerr := secretInput("EAB key id", "SB_EAB_KID")
-		hmac, herr := secretInput("EAB HMAC key", "SB_EAB_HMAC")
-		if kerr != nil || herr != nil {
-			return errors.Join(kerr, herr)
+		kid, hmac := strings.TrimSpace(os.Getenv("SB_EAB_KID")), strings.TrimSpace(os.Getenv("SB_EAB_HMAC"))
+		if kid == "" || hmac == "" {
+			var err error
+			fmt.Fprintln(os.Stderr, "requesting ZeroSSL ACME credentials for", *email)
+			if kid, hmac, err = zeroSSLEAB(*email); err != nil {
+				return &exitErr{exitError, "ZeroSSL: " + err.Error() + " (or set SB_EAB_KID and SB_EAB_HMAC)"}
+			}
 		}
 		cfg.Fallback = &config.EAB{Server: server, KeyID: kid, HMAC: hmac}
 	}
@@ -401,4 +406,27 @@ func runSSH(args []string) error {
 	}
 	fmt.Printf("ssh -i %s -o UserKnownHostsFile=%s -o StrictHostKeyChecking=yes root@%s\n", filepath.Join(st.Dir, "id_ed25519"), kh, st.Nodes[i].PublicIP)
 	return nil
+}
+
+// zeroSSLEAB requests ACME external account binding credentials from ZeroSSL for an email
+// address, the same way acme.sh and Caddy do. The credentials are reusable.
+func zeroSSLEAB(email string) (kid, hmac string, err error) {
+	resp, err := http.PostForm("https://api.zerossl.com/acme/eab-credentials-email", url.Values{"email": {email}})
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	var r struct {
+		Success bool   `json:"success"`
+		KID     string `json:"eab_kid"`
+		HMAC    string `json:"eab_hmac_key"`
+		Error   any    `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&r); err != nil {
+		return "", "", fmt.Errorf("unexpected response (HTTP %d)", resp.StatusCode)
+	}
+	if !r.Success || r.KID == "" || r.HMAC == "" {
+		return "", "", fmt.Errorf("no credentials returned: %v", r.Error)
+	}
+	return r.KID, r.HMAC, nil
 }
