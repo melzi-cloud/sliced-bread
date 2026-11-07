@@ -454,14 +454,23 @@ func (s *Server) startBackupRun(ctx context.Context, a *apps.App, kind, trigger,
 	if c == nil {
 		return nil, errors.New("backups are not configured; run: sb backups configure")
 	}
-	if err := s.ensureRepo(ctx, c); err != nil {
-		return nil, err
-	}
 	if a.Backup == nil {
 		a.Backup = &apps.BackupState{}
 	}
 	if a.Backup.Running != nil {
 		return nil, errBackupBusy
+	}
+	if err := s.ensureRepo(ctx, c); err != nil {
+		// Record it like any failed backup: the app shows it, the alert opens, and the
+		// schedule retries hourly instead of on every tick.
+		if kind != "restore" {
+			run := &apps.BackupRun{ID: randID(6), Kind: kind, Trigger: trigger, Snapshot: snapshot, StartedAt: now()}
+			s.finishRun(a, run, "failed", "backup repository: "+err.Error())
+			if serr := s.saveInternal(ctx, a); serr != nil {
+				s.logf("save %s: %v", a.Name, serr)
+			}
+		}
+		return nil, fmt.Errorf("backup repository: %w", err)
 	}
 	if kind != "backup" && snapshot == "" {
 		if a.Backup.LastBackup == nil || a.Backup.LastBackup.Phase != "succeeded" {

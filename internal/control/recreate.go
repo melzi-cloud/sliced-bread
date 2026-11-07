@@ -543,7 +543,7 @@ func (s *Server) ensureRepo(ctx context.Context, c *BackupConfig) error {
 	script := `set -eu
 ` + resticFn + `if r cat config >/dev/null 2>/tmp/err; then echo "SB_REPO exists"; exit 0; fi
 if grep -qi "wrong password\|ciphertext verification" /tmp/err; then echo "SB_ERROR the backup repository exists but the encryption password does not match it"; exit 1; fi
-r init >/dev/null 2>/tmp/err || { tail -2 /tmp/err; echo "SB_ERROR could not create the backup repository"; exit 1; }
+r init >/dev/null 2>/tmp/err || { tail -2 /tmp/err; echo "SB_ERROR could not open or create the backup repository: $(grep -v '^$' /tmp/err | tail -1 | cut -c1-200)"; exit 1; }
 echo "SB_REPO created"
 `
 	if _, err := s.runJob(ctx, repoJob("repo-init-"+randID(6), script, nil), 3*time.Minute); err != nil {
