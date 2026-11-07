@@ -1,5 +1,7 @@
 # App spec (draft)
 
+> Superseded for templates by [template-format.md](template-format.md) (D-032). Kept for the compose-like app spec ideas.
+
 A compose-like YAML file with SlicedBread extensions. The control plane renders it into Kubernetes resources. Templates in the catalog and user apps use the same format.
 
 The examples below are illustrative. Image tags, paths and health endpoints are placeholders until a template passes the verification workflow.

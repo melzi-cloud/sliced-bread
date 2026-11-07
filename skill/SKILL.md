@@ -46,7 +46,7 @@ App names: 2 to 30 lowercase letters, digits or dashes, starting with a letter. 
 - The app must listen on `$PORT` (set to 8080). Railpack handles this for static sites and most frameworks. For a Dockerfile app that listens elsewhere, pass `--port`.
 - Needs Postgres? Add `--database`: a Postgres database is created next to the app and `DATABASE_URL` is set (a `postgresql://` URL).
 - Has a health endpoint? Add `--health-path /healthz` so a new version only takes traffic once it answers there (default: the port accepts connections).
-- `--dir` skips `node_modules`, `.git`, `dist`, `build`, `.next`, `.venv`, `target` and similar folders. Everything else is uploaded, including `.env` files, because Vite and similar tools read them at build time. Do not keep server-side secrets in uploaded files; use `sb env set --secrets-stdin`. Preview the file list with `--dry-run`. A `.dockerignore` in the project is respected by the build. You do not need to build locally.
+- `--dir` skips `node_modules`, `.git`, `dist`, `build`, `.next`, `.venv`, `target` and similar folders. Everything else is uploaded, including `.env` files, because Vite and similar tools read them at build time. Do not keep server-side secrets in uploaded files; use `sb env generate` or `sb env request` (see Configuration). Preview the file list with `--dry-run`. A `.dockerignore` in the project is respected by the build. You do not need to build locally.
 - `sb status <app>` shows the content sha256 of the uploaded source and the build id serving. `sb deploy <app> --dir <path> --dry-run` prints the content sha256 of the folder as it is now (file contents only, timestamps ignored). Equal hashes mean the deployed source matches the folder. The app name can differ from the folder name.
 - To ship code changes: `sb redeploy <app> --dir <path>` (or `sb redeploy <app>` for a repo, which pulls the latest commit). The previous version keeps serving until the new build is ready.
 - If a build fails: `sb logs <app> --build` shows the clone, plan and build output.
@@ -64,12 +64,12 @@ Wall apps can expose specific paths publicly with `--public-path /path` (for web
 Change access later with `sb access <app> wall|app-auth|public [--public-path /x]`.
 
 **Making an app reachable by more people needs a human.** These return **exit code 3** with a pending approval:
-- deploying with `--access public` or `--access app-auth` yourself (access set by a template does not need approval)
+- deploying with `--access public` or `--access app-auth` yourself (access set by a catalog template does not need approval; a template from `--template-dir` does)
 - `sb access` to a wider mode, or adding public paths
-- template settings marked "needs human approval" in `sb catalog` (e.g. Vaultwarden signups=true)
+- template settings or actions marked "needs human approval" in `sb catalog`
 - `sb delete`
 
-Narrowing access (back to `wall`, signups=false) never needs approval.
+Narrowing access (back to `wall`) never needs approval.
 
 When you see exit code 3:
 
@@ -96,10 +96,13 @@ A request without a SlicedBread session gets a `302` redirect to the login page 
 
 ```sh
 sb env <app>                                   # list values (secrets show as <secret>)
-sb env set <app> KEY=value OTHER=value         # plain values; pods restart
-printf 'API_KEY=%s\n' "$VALUE" | sb env set <app> --secrets-stdin   # secret values via stdin only
+sb env set <app> KEY=value OTHER=value         # plain, non-secret values only; pods restart
+sb env generate <app> SESSION_SECRET           # the server creates a random secret; you never see it
+sb env request <app> STRIPE_KEY --description "Stripe secret key for payments"   # the user enters it in the dashboard
 sb env unset <app> KEY
 ```
+
+**You never see, type or generate secret values.** Do not invent a random string yourself (text from a language model is not random enough) and do not ask the user to paste a secret into the chat. If the app needs a random secret nobody has to read, use `sb env generate`. If it needs a value only the user has (an API key, a password), use `sb env request` and give the user the link it prints; `sb status <app>` shows it as a setup step until the value is entered. `sb deploy` takes the same as flags: `--generate KEY` and `--request KEY:description`.
 
 Values can reference:
 - `${app.url}`: this app's public URL
@@ -107,23 +110,27 @@ Values can reference:
 - `${apps.<other>.internal}`: another app's in-cluster URL (no login wall), e.g. for an API backend. Referencing it is what allows the traffic: apps can only reach apps they reference this way.
 - `${secret.NAME}`: a secret value, must be the whole value
 
-Never put secrets on the command line or in plain `--env` values. Use `--secrets-stdin`.
-
 Note: environment variables are runtime only. Frameworks that bake env into the bundle at build time (Vite `VITE_*`) need the value in the source (for example a committed `.env`) before `sb redeploy`.
 
 ## Templates
 
-Run `sb catalog` for the current list. Each template documents its settings, actions and notes. `sb status <app>` also shows them for a deployed app.
+Run `sb catalog` for the current list. Each template documents its components, settings, actions, setup steps and notes. `sb status <app>` shows them for a deployed app, plus which setup steps the user still has to do.
 
 ### Template actions
 
-Some templates expose typed actions so you do not have to click through UIs:
+Templates expose typed actions so you do not have to click through UIs. Each runs as a short job next to the app (a few seconds):
 
 ```sh
 sb action <app> <action> --input key=value
 ```
 
-Actions marked `adminOnly` show credentials, so a human runs them on the app's page in the dashboard (`https://auth.<tenant-domain>/apps/<app>`); give the user that link.
+- Actions marked "runs by itself when the app is installed" are run by SlicedBread; `sb wait` returns once they succeeded. If one keeps failing, `sb status` says why, and `sb logs <app> --action <name>` shows its output.
+- Actions marked "shows credentials" return a value only a human may see. You get the other fields and a dashboard link instead; give the user that link (`https://auth.<tenant-domain>/apps/<app>`).
+- Secret values never appear in action output: if one would, it shows as `[secret]`.
+
+### Setup steps
+
+Some templates need the user to do something once, for example create the first account. `sb status <app>` shows "setup for the user (not done yet)" with a link: give the user that exact link (it signs them in first). The step disappears by itself when it is done; nothing needs confirming.
 
 ### Example: add analytics to an app
 
@@ -145,14 +152,14 @@ Tell the user two things:
 ```sh
 sb deploy vault --template vaultwarden
 sb wait vault
-sb settings vault signups=true      # exit code 3: give the user the approve URL
-sb approvals --wait <id>            # once approved, the user registers at the app URL
-sb settings vault signups=false     # after the account exists (no approval needed to close)
+sb status vault     # "setup for the user": give the user the link to create their account
 ```
 
-Signups close automatically 15 minutes after the change is applied (that is, after the human approves), so tell the user to register right away. To narrow who can register, also set `signup_domain=<company domain>` (for example `sb settings vault signups=true signup_domain=acme.com`).
+Only members of this install can create Vaultwarden accounts: registration needs the SlicedBread login, the rest of Vaultwarden does not, so the Bitwarden apps keep working. There is no signup switch to open or close. To limit accounts to company addresses: `sb settings vault signup_domain=acme.com`. Tell the user: in the Bitwarden app or browser extension, choose "Self-hosted" and enter the app URL.
 
-Tell the user: in the Bitwarden app or browser extension, choose "Self-hosted" and enter the app URL.
+### Writing a template
+
+When the user wants off-the-shelf software that has no template, you can write one: a directory with `template.yaml` (format: `bakery.slicedbread.dev/v1`, see `docs/template-format.md` in the SlicedBread repository), action scripts under `actions/` and config files under `files/`. Pin every image by digest (`name:tag@sha256:...`). Deploy it with `sb deploy <app> --template-dir <path>`; errors in the template are reported with what to fix. A template from a directory is not trusted: its access defaults and public paths need human approval. Prefer catalog templates when one exists.
 
 ## Data and backups
 
@@ -227,7 +234,7 @@ Secrets come from environment variables, never flags: `HCLOUD_TOKEN`, `CLOUDFLAR
 
 ## Secrets the user pastes into the chat
 
-If the user pastes a key or password (S3 keys, API keys) into the conversation, do not pass it to commands you were not asked to run, do not store it in files, and do not repeat it. Where it belongs in the dashboard (backup bucket keys, members), give the link instead, and suggest rotating anything that was pasted. App secrets an app needs (for example a Stripe key) can be set with `sb env set <app> --secrets-stdin` when the user asks you to.
+If the user pastes a key or password (S3 keys, API keys) into the conversation, do not pass it to commands you were not asked to run, do not store it in files, and do not repeat it. Where it belongs in the dashboard (backup bucket keys, members), give the link instead, and suggest rotating anything that was pasted. App secrets an app needs (for example a Stripe key) go in through `sb env request <app> KEY`: the user enters the value in the dashboard, and should rotate any key already pasted into the chat.
 
 ## Rules
 

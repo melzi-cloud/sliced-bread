@@ -57,9 +57,9 @@ Backup storage is billed by your S3 provider. Restic deduplicates and compresses
 
 ## What it does today
 
-- **Deploy anything:** a catalog template (Vaultwarden, Umami), any container image, a public git repo, or a local directory such as a Lovable export, built in the cluster with Railpack or its Dockerfile.
+- **Deploy anything:** a catalog template (Vaultwarden, Umami; templates are data, can have several components, config files and scripted actions, and agents can write new ones), any container image, a public git repo, or a local directory such as a Lovable export, built in the cluster with Railpack or its Dockerfile.
 - **Your team, your rules:** invite teammates as members or admins on the dashboard. Members get past the login wall; whether they can also approve risky changes is an admin setting (off by default).
-- **Private by default:** every app sits behind a login wall unless you say otherwise. Apps with their own clients (Vaultwarden) opt out. Session cookies are host-only and never reach apps.
+- **Private by default:** every app sits behind a login wall unless you say otherwise. Apps with their own clients (Vaultwarden) opt out, keeping sensitive paths such as account registration behind the wall. Agents never see secret values: the server generates random secrets, and you type the others into the dashboard. Session cookies are host-only and never reach apps.
 - **Backups that are proven:** daily restic backups of volumes and Postgres to your bucket, each followed by a restore test into a scratch namespace: restic verifies every restored file's content, the file count must match, required files must be present (Vaultwarden's database), and a database dump must load into a fresh Postgres with the same tables. `sb restore` replaces an app's data with a snapshot, and `sb restore <app> --recreate` brings back a deleted app (spec, secrets, source and data) from the bucket alone.
 - **Tells you when something breaks:** failed backups or restore tests, apps that stay down, certificates that don't renew and servers that disappear show on the dashboard and in `sb alerts`, and can be posted to a webhook (Slack, Discord, ntfy or JSON) when they open and when they clear.
 - **Maintains itself:** Debian security updates install automatically. Servers that need a reboot are restarted one at a time in a nightly window, after their apps have moved: apps without a volume keep serving, apps with a volume pause for under a minute. Newer upstream versions of template images are reported (not applied). On 3 servers, a server that dies is fenced and replaced by a new one with no manual steps.
@@ -89,7 +89,7 @@ Backup storage is billed by your S3 provider. Restic deduplicates and compresses
 | Vaultwarden | 2 min 58 s |
 | Umami (through its database) | 3 min 24 s |
 
-No data was lost, including a Vaultwarden account created seconds before the power-off. The login wall comes back as soon as the standby guard has fenced the dead server (D-029). Apps with a volume take longer because Hetzner moves the volume only once the dead server is deleted.
+No data was lost, including a Vaultwarden account created seconds before the power-off. The login wall comes back as soon as the standby guard has fenced the dead server (D-031). Apps with a volume take longer because Hetzner moves the volume only once the dead server is deleted.
 
 ## Docs
 

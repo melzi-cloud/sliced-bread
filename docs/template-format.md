@@ -1,6 +1,6 @@
 # Template format v1
 
-Status: proposed for sign-off (2026-11-07), not implemented. Replaces the Go templates in `internal/apps/catalog.go` and the Go actions in `internal/control/hooks.go`. Builds on D-029 (actions are container jobs, multi-component apps come with the format) and D-030 (agents never see or write secret values).
+Status: implemented (D-032, 2026-11-07). The built-in templates are in `internal/apps/templates/`; they move to `melzi-cloud/bakery` with the template registry (task #16). Builds on D-029 (actions are container jobs, multi-component apps come with the format) and D-030 (agents never see or write secret values).
 
 ## Goals
 
@@ -180,7 +180,9 @@ actions:
 ```
 
 **How an action runs:**
-- **Image:** every action names one, pinned by digest: the app's own image when the action needs its CLI, a Postgres image for `psql`, or the published runtime image (`sh`, `curl`, `jq`).
+- **Image:** every action names one, pinned by digest: the app's own image when the action needs its CLI, a Postgres image for `psql`, or a general one. The built-in templates use the official `node` image, which has `fetch` and SQLite built in.
+- **Files:** the template directory is mounted at `/sb/template` (the working directory); `run` names the script, which must start with `#!`. Volumes listed in `volumes` are mounted read-only at `/volumes/<name>`.
+- **Logs:** `sb logs <app> --action <name>` shows the latest run (kept 15 minutes), with secret values masked.
 - **Environment:** `SB_APP_INTERNAL` (the first component's internal URL), `SB_APP_URL`, each input as `SB_INPUT_<NAME>`, `SB_DB_URL` if the action lists `database: true`, and only the declared secrets.
 - **Volumes:** `volumes: [data]` mounts the app's volume read-only (the job runs on the app's server).
 - **Network:** the job reaches the app, its database and DNS only, unless the action lists `egress: [hosts]`.

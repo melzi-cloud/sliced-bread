@@ -129,7 +129,7 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 <td>{{if $.IsAdmin}}<form method="post" action="/members/{{.Email}}"><input type="hidden" name="csrf" value="{{$.CSRF}}">
 {{if eq .Role "admin"}}<button name="action" value="member">Make member</button>{{else}}<button name="action" value="admin">Make admin</button>{{end}}<button name="action" value="remove">Remove</button></form>{{end}}</td></tr>{{end}}
 {{range .Invites}}<tr><td>{{.Email}}</td><td class="muted">invited as {{.Role}}, until {{.Expires}}</td><td>{{if $.IsAdmin}}<form method="post" action="/members/{{.Email}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button name="action" value="remove">Revoke</button></form>{{end}}</td></tr>{{end}}</table>
-<p>Members can approve risky changes (making apps public, opening signups, deletes, restores): <b>{{if .MembersCanApprove}}yes{{else}}no, only admins{{end}}</b></p>
+<p>Members can approve risky changes (making apps public, deletes, restores, actions marked for approval): <b>{{if .MembersCanApprove}}yes{{else}}no, only admins{{end}}</b></p>
 {{if .IsAdmin}}
 <form method="post" action="/members/settings"><input type="hidden" name="csrf" value="{{.CSRF}}">
 {{if .MembersCanApprove}}<button name="membersCanApprove" value="false">Only admins approve</button>{{else}}<button name="membersCanApprove" value="true">Let members approve</button>{{end}}</form>

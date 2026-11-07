@@ -9,8 +9,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/exec"
@@ -117,13 +119,17 @@ func TestNodeLoss(t *testing.T) {
 	}
 
 	// 2. Apps with data.
-	run("deploy", "vault", "--template", "vaultwarden", "--set", "signups=true")
+	run("deploy", "vault", "--template", "vaultwarden")
 	run("deploy", "analytics", "--template", "umami")
 	run("wait", "vault", "--timeout", "10m")
 	run("wait", "analytics", "--timeout", "15m")
 	vault := "https://vault." + st.Domain
 	user := "nodeloss@example.com"
-	if err := vwRegister(ctx, vault, user); err != nil {
+	browser, err := appSession(ctx, filepath.Join(st.Dir, "admin-login.json"), vault)
+	if err != nil {
+		t.Fatalf("sign in to vaultwarden through the login wall: %v", err)
+	}
+	if err := vwRegister(ctx, browser, vault, user); err != nil {
 		t.Fatalf("register vaultwarden user: %v", err)
 	}
 	run("action", "analytics", "create_website", "--input", "name=NodeLoss", "--input", "domain=nodeloss.example.com")
@@ -310,12 +316,14 @@ func replacementReady(ctx context.Context, hc *hcloud.Client, st *tenant.State, 
 // Vaultwarden accounts without a mail server: the verification token comes back directly.
 func vwHash(email string) string { return base64.StdEncoding.EncodeToString([]byte("hash-" + email)) }
 
-func vwRegister(ctx context.Context, base, email string) error {
+// vwRegister creates a Vaultwarden account. Registration is behind the login wall, so
+// client must hold a session for the app host (see appSession).
+func vwRegister(ctx context.Context, client *http.Client, base, email string) error {
 	post := func(path string, v any) (string, error) {
 		b, _ := json.Marshal(v)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(b))
 		req.Header.Set("Content-Type", "application/json")
-		resp, err := httpc.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return "", err
 		}
@@ -353,4 +361,52 @@ func vwLogin(ctx context.Context, base, email string) error {
 		return fmt.Errorf("login HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// appSession signs a browser-like client in to an app host the way a person does: open
+// the app's /__sb/enter link, log in on the dashboard, follow the exchange back.
+func appSession(ctx context.Context, loginFile, app string) (*http.Client, error) {
+	var cred struct{ URL, Email, Password string }
+	b, err := os.ReadFile(loginFile)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(b, &cred); err != nil {
+		return nil, err
+	}
+	jar, _ := cookiejar.New(nil)
+	c := &http.Client{Jar: jar, Timeout: 20 * time.Second}
+	get := func(u string) (*http.Response, string, error) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		req.Header.Set("Accept", "text/html")
+		resp, err := c.Do(req)
+		if err != nil {
+			return nil, "", err
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp, string(body), nil
+	}
+	resp, body, err := get(app + "/__sb/enter?to=%2F")
+	if err != nil {
+		return nil, err
+	}
+	rd := resp.Request.URL.Query().Get("rd")
+	m := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(body)
+	if m == nil || rd == "" {
+		return nil, fmt.Errorf("no login form at %s", resp.Request.URL)
+	}
+	form := url.Values{"csrf": {html.UnescapeString(m[1])}, "email": {cred.Email}, "password": {cred.Password}, "rd": {rd}}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cred.URL+"/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "text/html")
+	resp, err = c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body.Close()
+	if !strings.HasPrefix(resp.Request.URL.String(), app) {
+		return nil, fmt.Errorf("login ended at %s, not on the app", resp.Request.URL)
+	}
+	return c, nil
 }
