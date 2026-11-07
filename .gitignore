@@ -12,3 +12,4 @@ test/artifacts/
 bin/
 
 internal/controlbin/payload/sb-control
+/sb

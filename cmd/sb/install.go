@@ -83,11 +83,13 @@ const initUsage = `sb init --domain <base domain> --email <admin email> [--size 
 Creates a SlicedBread install in your own Hetzner account. Apps are served at https://<app>.<base domain>.
 Secrets (read from the environment, or prompted for on a terminal):
   HCLOUD_TOKEN           Hetzner Cloud API token (read and write). Use a dedicated Hetzner project.
-  CLOUDFLARE_API_TOKEN   Cloudflare token with Zone / DNS / Edit on the zone that contains the base domain.
+  CLOUDFLARE_API_TOKEN   Cloudflare token with Zone / DNS / Edit on the zone that contains the base domain
+                         (CF_API_TOKEN is also accepted).
   SB_EAB_KID, SB_EAB_HMAC  ZeroSSL external account binding for --fallback-issuer (optional: without them
                          sb init requests one from ZeroSSL with the --email address).
   SB_BACKUP_ACCESS_KEY_ID, SB_BACKUP_SECRET_ACCESS_KEY  S3 keys for --backup-bucket (recommended: a bucket
                          in another location, e.g. Cloudflare R2 or Hetzner Object Storage).
+Test installs: --expire-after 6h labels every resource to be deleted by the SlicedBread reaper after that time.
 Sizes (Hetzner prices incl. VAT, nbg1, cx23): 1 node about EUR 7/month (no high availability); 3 nodes plus a
 load balancer about EUR 29/month. Each app volume and database adds about EUR 0.77/month (10 GB volume).`
 
@@ -253,11 +255,13 @@ SlicedBread is ready.
   install id:  %s
   apps:        https://<app>.%s
   dashboard:   https://auth.%s   (email and password in %s)
-  this CLI:    logged in with an admin token (%s)
-  your agent:  run "sb login --api https://api.%s" in the agent's environment; you approve it in the browser
+  this CLI:    logged in with an ADMIN token (%s): it can approve its own requests
+  agents:      use the agent token instead, so exposure changes, deletes and restores wait for you:
+                 export SB_CONFIG=%s
+               (or run "sb login --api https://api.%s" in the agent's environment and approve it in the browser)%s
   backups:     %s
   remove:      sb destroy %s
-`, st.RunID, st.Domain, st.Domain, filepath.Join(st.Dir, "admin-login.json"), cfgPath, st.Domain, backupLine, st.RunID)
+`, st.RunID, st.Domain, st.Domain, filepath.Join(st.Dir, "admin-login.json"), cfgPath, filepath.Join(st.Dir, "cli-agent.json"), st.Domain, expiryLine(st), backupLine, st.RunID)
 	return nil
 }
 
@@ -282,7 +286,11 @@ func runInstalls() error {
 		if err != nil {
 			continue
 		}
-		rows = append(rows, fmt.Sprintf("%s  %d node(s)  https://<app>.%s", st.RunID, st.Size, st.Domain))
+		exp := ""
+		if !st.ExpiresAt.IsZero() {
+			exp = "  expires " + st.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		rows = append(rows, fmt.Sprintf("%s  %d node(s)  https://<app>.%s%s", st.RunID, st.Size, st.Domain, exp))
 	}
 	sort.Strings(rows)
 	if len(rows) == 0 {
@@ -429,4 +437,11 @@ func zeroSSLEAB(email string) (kid, hmac string, err error) {
 		return "", "", fmt.Errorf("no credentials returned: %v", r.Error)
 	}
 	return r.KID, r.HMAC, nil
+}
+
+func expiryLine(st *tenant.State) string {
+	if st.ExpiresAt.IsZero() {
+		return ""
+	}
+	return "\n  expires:     " + st.ExpiresAt.UTC().Format(time.RFC3339) + " (test install: everything is deleted then)"
 }

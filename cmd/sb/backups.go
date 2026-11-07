@@ -76,7 +76,11 @@ func (c *client) runBackupCmd(cmd string, fs *flag.FlagSet, rest []string, jsonO
 			}
 		}
 		if len(v.Apps) == 0 {
-			fmt.Println("(no apps with volumes or databases)")
+			if len(pos) == 1 {
+				fmt.Printf("%s has no volume or database, so there is nothing to back up (or it does not exist: see sb apps)\n", pos[0])
+			} else {
+				fmt.Println("(no apps with volumes or databases)")
+			}
 		}
 		return true, nil
 
@@ -119,7 +123,7 @@ func (c *client) runBackupCmd(cmd string, fs *flag.FlagSet, rest []string, jsonO
 			fmt.Println("follow with: sb backups", app)
 			return true, nil
 		}
-		return true, c.waitBackups(app, *timeout)
+		return true, c.waitBackups(app, cmd, *timeout)
 
 	case "export":
 		secrets := fs.Bool("include-secrets", false, "")
@@ -193,7 +197,7 @@ func writeIndented(path string, raw json.RawMessage) error {
 	return os.WriteFile(path, append(b, '\n'), 0o600)
 }
 
-func (c *client) waitBackups(app string, timeout time.Duration) error {
+func (c *client) waitBackups(app, cmd string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		b, _, err := c.call("GET", "/v1/backups?app="+url.QueryEscape(app), nil)
@@ -204,26 +208,36 @@ func (c *client) waitBackups(app string, timeout time.Duration) error {
 			Apps []struct {
 				Summary string `json:"summary"`
 				State   *struct {
-					Running     *struct{ Kind string }           `json:"running"`
-					LastBackup  *struct{ Phase, Message string } `json:"lastBackup"`
-					LastTest    *struct{ Phase, Message string } `json:"lastTest"`
-					LastRestore *struct{ Phase, Message string } `json:"lastRestore"`
+					Running     *struct{ Kind string } `json:"running"`
+					LastBackup  *runView               `json:"lastBackup"`
+					LastTest    *runView               `json:"lastTest"`
+					LastRestore *runView               `json:"lastRestore"`
 				} `json:"state"`
 			} `json:"apps"`
 		}
 		json.Unmarshal(b, &v)
 		if len(v.Apps) == 1 && v.Apps[0].State != nil && v.Apps[0].State.Running == nil {
 			st := v.Apps[0].State
-			fmt.Println(v.Apps[0].Summary)
-			if st.LastRestore != nil && st.LastRestore.Phase == "failed" {
-				return &exitErr{exitError, "restore failed: " + st.LastRestore.Message}
-			}
-			for _, r := range []*struct{ Phase, Message string }{st.LastBackup, st.LastTest} {
-				if r != nil && r.Phase == "failed" {
-					return &exitErr{exitError, "failed: " + r.Message}
+			check := func(label string, r *runView) error {
+				if r == nil {
+					return nil
 				}
+				fmt.Println(r.line(label))
+				if r.Phase == "failed" {
+					return &exitErr{exitError, label + " failed: " + r.Message}
+				}
+				return nil
 			}
-			return nil
+			switch cmd {
+			case "restore":
+				return check("restore", st.LastRestore)
+			case "restore-test":
+				return check("restore test", st.LastTest)
+			}
+			if err := check("backup", st.LastBackup); err != nil {
+				return err
+			}
+			return check("restore test", st.LastTest)
 		}
 		time.Sleep(5 * time.Second)
 	}
@@ -273,3 +287,24 @@ func (c *client) backupsConfigure(fs *flag.FlagSet, args []string, jsonOut *bool
 const backupsConfigureUsage = `usage: sb backups configure --endpoint https://<s3 endpoint> --bucket <bucket> [--region auto] [--prefix path] [--hour 3]
 Keys come from SB_BACKUP_ACCESS_KEY_ID and SB_BACKUP_SECRET_ACCESS_KEY (or a prompt). To reuse an existing
 backup repository set SB_BACKUP_PASSWORD. Admin token only.`
+
+type runView struct {
+	ID, Phase, Message, Snapshot, FinishedAt string
+	Files, DBTables                          int
+	DBRows                                   int64
+}
+
+func (r runView) line(label string) string {
+	snap := r.Snapshot
+	if len(snap) > 12 {
+		snap = snap[:12]
+	}
+	s := fmt.Sprintf("%s %s: %s, snapshot %s", label, r.ID, r.Phase, snap)
+	if r.Phase == "succeeded" {
+		s += fmt.Sprintf(", %d files", r.Files)
+		if r.DBTables > 0 {
+			s += fmt.Sprintf(", %d db tables, %d rows", r.DBTables, r.DBRows)
+		}
+	}
+	return s
+}

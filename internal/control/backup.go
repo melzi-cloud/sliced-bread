@@ -449,7 +449,11 @@ func (s *Server) checkBackups(ctx context.Context, a *apps.App, c *BackupConfig)
 			return true
 		}
 		if c != nil && a.HasData() && s.backupDue(ctx, a, c, time.Now().UTC()) {
-			if _, err := s.startBackupRun(ctx, a, "backup", "schedule", ""); err != nil {
+			trigger := "schedule"
+			if a.Backup == nil || a.Backup.LastBackup == nil {
+				trigger = "initial"
+			}
+			if _, err := s.startBackupRun(ctx, a, "backup", trigger, ""); err != nil {
 				s.logf("scheduled backup %s: %v", a.Name, err)
 			}
 			return false // startBackupRun saved
@@ -571,8 +575,8 @@ func (s *Server) backupDue(ctx context.Context, a *apps.App, c *BackupConfig, t 
 			}
 		}
 	}
-	var dep kube.Obj
-	if err := s.kube.Get(ctx, "apps/v1", "Deployment", apps.Namespace(a.Name), "web", &dep); err != nil || kube.Num(dep, "status", "readyReplicas") < 1 {
+	// Only back up a settled app: running, latest version serving, template setup finished.
+	if st := s.status(ctx, a); st.State != "running" {
 		return false
 	}
 	if a.Database {

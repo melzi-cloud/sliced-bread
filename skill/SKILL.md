@@ -5,7 +5,7 @@ description: Deploy and operate apps (off-the-shelf software, container images, 
 
 # SlicedBread
 
-SlicedBread runs apps on the user's own private cluster. Every app gets `https://<app>.<tenant-domain>` with a trusted certificate. Apps are **private by default**: a login wall in front of the app lets only the user's team in.
+SlicedBread runs apps on the user's own private cluster. Every app gets `https://<app>.<tenant-domain>` with a trusted certificate. Apps are **private by default**: a login wall in front of the app lets only signed-in users in. Today that is a single admin account (no team members yet), so say "only you" rather than "your team".
 
 You operate it with the `sb` CLI. You never need kubectl, SSH or cloud consoles.
 
@@ -163,8 +163,11 @@ When backups are configured (`sb backups` says so), every app with a volume or d
 sb backups                 # target, schedule, per app: last backup and last restore test
 sb backups <app>           # plus the list of snapshots
 sb backup <app> --wait     # back up now (then the restore test runs); exit 1 if either fails
+sb restore-test <app> [--snapshot ID] --wait   # test any snapshot again without touching the app
 sb restore <app> [--snapshot ID] --wait   # replace the app's data with a snapshot (default: latest)
 ```
+
+What a restore test checks, so you can report it accurately: restic restores the snapshot into a scratch namespace and verifies every file's content against the backup; the number of restored files must match the backup; template-required files must exist and be non-empty (Vaultwarden: `db.sqlite3`; its SQLite integrity is not checked); a database dump must load into a fresh Postgres with the same number of tables (rows are counted and reported). The first backup of a new app runs once it is running and its template setup has finished (trigger `initial`).
 
 - A restore stops the app, replaces its volumes and database, and starts it again. With an agent token it needs human approval (exit code 3); tell the user what will be lost (everything since that snapshot).
 - Apps that keep SQLite files (Vaultwarden) are stopped for a few seconds during each backup. `sb status` then shows `paused`; it resumes by itself.
@@ -180,7 +183,7 @@ sb init --domain apps.example.com --email you@example.com --size 1 \
   [--backup-endpoint https://<s3 endpoint> --backup-bucket <bucket>]
 ```
 
-Secrets come from environment variables, never flags: `HCLOUD_TOKEN`, `CLOUDFLARE_API_TOKEN`, and for backups `SB_BACKUP_ACCESS_KEY_ID` and `SB_BACKUP_SECRET_ACCESS_KEY`. Never print them. `--size 1` is one server (about EUR 7/month, no high availability), `--size 3` is three servers and a load balancer (about EUR 29/month). It takes about 10 minutes, then the CLI is logged in with an admin token. Tell the user where the dashboard login and the backup encryption password were saved (printed at the end), and that `sb destroy <install-id>` removes everything.
+Secrets come from environment variables, never flags: `HCLOUD_TOKEN`, `CLOUDFLARE_API_TOKEN` (or `CF_API_TOKEN`), and for backups `SB_BACKUP_ACCESS_KEY_ID` and `SB_BACKUP_SECRET_ACCESS_KEY`. Never print them. `--size 1` is one server (about EUR 7/month, no high availability), `--size 3` is three servers and a load balancer (about EUR 29/month). It takes 5 to 10 minutes, then the CLI is logged in with an **admin** token, which approves its own requests. Before doing anything else, switch yourself to the agent token that `sb init` printed (`export SB_CONFIG=<install dir>/cli-agent.json`) so exposure changes, deletes and restores wait for the user, as the rest of this file assumes. Admin-only steps (`sb backups configure`, `sb export`, approvals) are for the user. Tell the user where the dashboard login and the backup encryption password were saved (printed at the end), and that `sb destroy <install-id>` removes everything.
 
 ## Troubleshooting
 
