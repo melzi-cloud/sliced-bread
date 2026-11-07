@@ -39,9 +39,11 @@ func TestNodeLoss(t *testing.T) {
 		t.Fatalf("config (run through hack/secrets-env): %v", err)
 	}
 	root := repoRoot(t)
-	sb := filepath.Join(root, "bin", "sb")
-	if _, err := os.Stat(sb); err != nil {
-		t.Fatal("bin/sb missing: run make build")
+	sb, sbDev := filepath.Join(root, "bin", "sb"), filepath.Join(root, "bin", "sb-dev")
+	for _, b := range []string{sb, sbDev} {
+		if _, err := os.Stat(b); err != nil {
+			t.Fatal(b + " missing: run make build")
+		}
 	}
 	p := tenant.New(cfg, filepath.Join(root, tenant.StateRoot))
 	p.Logf = func(f string, a ...any) { t.Logf(f, a...) }
@@ -49,7 +51,7 @@ func TestNodeLoss(t *testing.T) {
 	defer cancel()
 
 	// 1. A full install, as `make prototype-up` makes it.
-	cmd := exec.CommandContext(ctx, sb, "dev", "prototype", "up")
+	cmd := exec.CommandContext(ctx, sbDev, "prototype", "up")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "SB_TTL=3h")
 	var out bytes.Buffer
