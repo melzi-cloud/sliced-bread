@@ -66,6 +66,7 @@ type Guard struct {
 	hc      *hcloud.Client
 	hcToken string
 	lastMsg string
+	dnsAt   time.Time
 }
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339) }
@@ -235,6 +236,12 @@ func (g *Guard) step(ctx context.Context) error {
 		return err
 	}
 	nodes := nodeViews(list)
+	if time.Since(g.dnsAt) > time.Minute {
+		if err := g.ensureCoreDNS(ctx); err != nil {
+			g.say("sb-guard: coredns: %v", err)
+		}
+		g.dnsAt = time.Now()
+	}
 	st := g.load(ctx)
 	now := time.Now()
 	if st.Active != nil {
@@ -284,7 +291,14 @@ func (g *Guard) step(ctx context.Context) error {
 		return g.save(ctx, st)
 	}
 	if recent(st.History, now) >= maxPerDay {
-		g.say("sb-guard: %s is dead, but %d servers were replaced in the last 24 hours; not replacing more automatically", n.Name, maxPerDay)
+		// Still fence it, so its pods and volumes move to the healthy servers; fencing a
+		// server Hetzner reports off or gone is always safe.
+		if status != string(hcloud.ServerStatusRunning) {
+			if err := g.taint(ctx, n.Name); err != nil {
+				return err
+			}
+		}
+		g.say("sb-guard: %s is dead, but %d servers were replaced in the last 24 hours; fenced it, not replacing more automatically", n.Name, maxPerDay)
 		return nil
 	}
 	reason := "server " + orGone(status) + " and node NotReady"
@@ -588,4 +602,53 @@ func (g *Guard) recordNode(ctx context.Context, n tenant.NodeInfo) error {
 func LoadState(ctx context.Context, k *kube.Client) *State {
 	g := &Guard{Kube: k}
 	return g.load(ctx)
+}
+
+// ensureCoreDNS runs cluster DNS on two servers and moves it off an unreachable server
+// within 30 seconds. k3s ships one replica, so losing its server stalled every name
+// lookup in the cluster for about 5 minutes. k3s may reset these fields when it restarts;
+// the guard puts them back within a minute.
+func (g *Guard) ensureCoreDNS(ctx context.Context) error {
+	var d kube.Obj
+	if err := g.Kube.Get(ctx, "apps/v1", "Deployment", "kube-system", "coredns", &d); err != nil {
+		return err
+	}
+	spec, _ := d["spec"].(map[string]any)
+	tpl, _ := spec["template"].(map[string]any)
+	pod, _ := tpl["spec"].(map[string]any)
+	tols, _ := pod["tolerations"].([]any)
+	has := map[string]bool{}
+	var keep []any
+	for _, t := range tols {
+		m, _ := t.(map[string]any)
+		k, _ := m["key"].(string)
+		if k == "node.kubernetes.io/not-ready" || k == "node.kubernetes.io/unreachable" {
+			if fmt.Sprint(m["tolerationSeconds"]) == "30" {
+				has[k] = true
+				keep = append(keep, t)
+			}
+			continue
+		}
+		keep = append(keep, t)
+	}
+	aff, _ := pod["affinity"].(map[string]any)
+	_, hasAffinity := aff["podAntiAffinity"]
+	if fmt.Sprint(spec["replicas"]) == "2" && has["node.kubernetes.io/not-ready"] && has["node.kubernetes.io/unreachable"] && hasAffinity {
+		return nil
+	}
+	for _, k := range []string{"node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable"} {
+		if !has[k] {
+			keep = append(keep, map[string]any{"key": k, "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 30})
+		}
+	}
+	g.Logf("sb-guard: running cluster DNS on two servers")
+	return g.Kube.MergePatch(ctx, "apps/v1", "Deployment", "kube-system", "coredns", map[string]any{"spec": map[string]any{
+		"replicas": 2,
+		"template": map[string]any{"spec": map[string]any{
+			"tolerations": keep,
+			"affinity": map[string]any{"podAntiAffinity": map[string]any{"requiredDuringSchedulingIgnoredDuringExecution": []any{
+				map[string]any{"topologyKey": "kubernetes.io/hostname", "labelSelector": map[string]any{"matchLabels": map[string]any{"k8s-app": "kube-dns"}}},
+			}}},
+		}},
+	}})
 }

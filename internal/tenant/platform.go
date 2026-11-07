@@ -161,6 +161,9 @@ spec:
       labels: {app: sb-guard}
     spec:
       serviceAccountName: sb-control
+      # The server's own resolver: the guard must reach the Hetzner API even while
+      # cluster DNS is down with a dead server.
+      dnsPolicy: Default
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

@@ -126,16 +126,24 @@ func (p *Provisioner) ImportImage(ctx context.Context, st *State, tarBytes []byt
 				errs[i] = err
 				return
 			}
-			cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer cancel()
 			_, errs[i] = t.Run(cctx, "k3s ctr -n k8s.io images import -", bytes.NewReader(tarBytes))
 		}(i)
 	}
 	wg.Wait()
+	// A server that is down (being replaced) is skipped: it pulls the image from the
+	// in-cluster registry when it joins. At least one server must have it.
+	ok := 0
 	for i, err := range errs {
 		if err != nil {
-			return fmt.Errorf("import on %s: %w", st.Nodes[i].Name, err)
+			p.Logf("[%s] could not import on %s (skipped; it pulls from the registry when back): %v", st.RunID, st.Nodes[i].Name, err)
+			continue
 		}
+		ok++
+	}
+	if ok == 0 {
+		return fmt.Errorf("import failed on every server: %w", errs[0])
 	}
 	return nil
 }

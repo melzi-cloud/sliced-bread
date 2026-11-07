@@ -147,7 +147,8 @@ func TestNodeLoss(t *testing.T) {
 	checks := map[string]func() bool{
 		// /alive, not a login: Vaultwarden rate-limits logins, and polling would trip it.
 		"vaultwarden": func() bool { return httpOK(ctx, vault+"/alive") },
-		"umami":       func() bool { return try("check", "analytics", "/api/heartbeat") == nil },
+		// stats reads from Umami's Postgres; the heartbeat page does not touch the database.
+		"umami":       func() bool { return try("action", "analytics", "stats") == nil },
 		"dashboard":   func() bool { return httpOK(ctx, "https://auth."+st.Domain+"/login") },
 		"replacement": func() bool { return replacementReady(ctx, p.HC, st, victim, srv.ID) },
 	}
