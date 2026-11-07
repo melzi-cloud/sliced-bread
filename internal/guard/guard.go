@@ -271,7 +271,7 @@ func (g *Guard) step(ctx context.Context) error {
 	// stored as an Active repair in phase "reset".
 	switch Decide(status, now.Sub(n.Since), time.Time{}, now) {
 	case Wait:
-		g.say("sb-guard: %s NotReady for %s (server %s), watching", n.Name, now.Sub(n.Since).Round(time.Second), orGone(status))
+		g.say("sb-guard: %s NotReady since %s (server %s), watching", n.Name, ts(n.Since), orGone(status))
 		return nil
 	case Reset:
 		if a, _, err := hc.Server.Reset(ctx, srv); err != nil {

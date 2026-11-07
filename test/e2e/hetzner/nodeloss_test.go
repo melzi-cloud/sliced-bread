@@ -145,7 +145,8 @@ func TestNodeLoss(t *testing.T) {
 	// 5. Measure.
 	results := map[string]time.Duration{}
 	checks := map[string]func() bool{
-		"vaultwarden": func() bool { return vwLogin(ctx, vault, user) == nil },
+		// /alive, not a login: Vaultwarden rate-limits logins, and polling would trip it.
+		"vaultwarden": func() bool { return httpOK(ctx, vault+"/alive") },
 		"umami":       func() bool { return try("check", "analytics", "/api/heartbeat") == nil },
 		"dashboard":   func() bool { return httpOK(ctx, "https://auth."+st.Domain+"/login") },
 		"replacement": func() bool { return replacementReady(ctx, p.HC, st, victim, srv.ID) },
@@ -195,6 +196,16 @@ func TestNodeLoss(t *testing.T) {
 	dir := filepath.Join(root, "test", "artifacts", runID)
 	os.MkdirAll(dir, 0o700)
 	os.WriteFile(filepath.Join(dir, "node-loss.json"), b, 0o600)
+	for name, args := range map[string]string{
+		"events.txt":     "get events -A --sort-by=.lastTimestamp",
+		"guard.log":      "-n sb-system logs deploy/sb-guard",
+		"cnpg.log":       "-n cnpg-system logs deploy/cloudnative-pg --tail 400",
+		"pods-after.txt": "get pods -A -o wide",
+	} {
+		if out, err := st.Kubectl(ctx, args, nil); err == nil {
+			os.WriteFile(filepath.Join(dir, name), out, 0o600)
+		}
+	}
 	t.Logf("node-loss result:\n%s", b)
 }
 

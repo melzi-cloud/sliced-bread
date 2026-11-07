@@ -62,6 +62,10 @@ var Catalog = map[string]*Template{
 			a.HealthPath = "/alive"
 			a.Access = AccessAppAuth
 			setDefault(a, "ROCKET_PORT", "8080")
+			// Vaultwarden's default is WAL with synchronous=NORMAL, which does not sync on
+			// commit: a hard power loss drops the last seconds of changes (found by the
+			// node-loss test). FULL syncs every commit to the volume.
+			setDefault(a, "DATABASE_CONN_INIT", "PRAGMA busy_timeout = 5000; PRAGMA synchronous = FULL;")
 			setDefault(a, "DOMAIN", "${app.url}")
 			setDefault(a, "INVITATIONS_ALLOWED", "false")
 			setDefault(a, "SHOW_PASSWORD_HINT", "false")

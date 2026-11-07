@@ -134,5 +134,6 @@ What is built today, and where it differs from the target design above:
 | Sources | Templates (Vaultwarden, Umami), container images, public git repos, uploaded directories (D-017, D-018). |
 | Databases | CloudNativePG, one instance per app. No backups yet. |
 | Backups and restore tests | Not built (M6). Do not put real data on a prototype tenant. |
-| Node replacement, patching | Not built. Debian unattended upgrades are not enabled yet. |
+| Node replacement | sb-guard (D-026): a server Hetzner reports off or gone is fenced with the out-of-service taint, deleted and recreated with the same name and private IP; a server that runs but stays NotReady gets one hard reset after 5 minutes, then replacement. 3-node installs only, at most 3 per day. |
+| Patching | Not built. Debian unattended upgrades are not enabled yet. |
 | Known gaps | Apps run as root in containers with all capabilities dropped (Pod Security `baseline`, warn on `restricted`). The in-cluster registry has no login (only build pods and nodes can reach it; apps run by digest). Build pods run with unconfined seccomp and AppArmor for rootless BuildKit. |

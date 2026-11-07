@@ -11,6 +11,8 @@ What SlicedBread protects against, what it does not, and where the trust boundar
 | App secret values in backups | Every snapshot carries the app's spec and secret values (and uploaded source), so it can recreate the app; encrypted by restic like the data |
 | Backup keys and encryption password | Secret `sb-system/sb-backup`, copied as `sb-backup-env` into namespaces that run backup jobs; the password is also shown once to the admin |
 | TLS private keys | Secrets in the cluster; never leave it |
+| Hetzner token in the cluster | `sb-system/sb-provider` (also `kube-system/hcloud` for the volume driver); sb-guard uses it to reset, delete and create servers of this install. It can do anything in the Hetzner project, so use a project per install |
+| k3s join token | `sb-system/sb-join`, readable by sb-control and sb-guard; rotated once at install |
 | API tokens | Agent tokens on the user's machine (`~/.config/slicedbread`); expiring admin tokens only where an admin put them for automation; hashes in `sb-system/sb-auth` |
 | Dashboard accounts | Owner created through a one-time setup link (code hash in `sb-system/sb-setup`, deleted after use); members through invite links; bcrypt hashes in `sb-system/sb-auth` |
 | Login sessions | Signed, host-only browser cookies |
@@ -21,7 +23,7 @@ What SlicedBread protects against, what it does not, and where the trust boundar
 2. **Browser to apps.** `wall` apps require a session. The auth host issues a one-time exchange token per app host; each app host gets its own `__Host-` cookie that other hosts, including sibling subdomains and other installs under the same parent domain, cannot set, read or shadow. SlicedBread cookies are removed before requests reach apps.
 3. **App to app.** Each app has its own namespace with a NetworkPolicy that only admits traffic from the same app, the platform and apps that explicitly reference it with `${apps.<name>.internal}`. App pods get no service account token.
 4. **Builds.** Source builds run in `sb-builds`, one pod each, rootless, unreachable from the network. The registry admits only build pods and the nodes; apps run images by digest.
-5. **App to node.** Pods cannot reach the Hetzner metadata service (it holds the original join token and host keys); the k3s join token is rotated once the cluster has formed. Containers run with privilege escalation off and a reduced capability set.
+5. **App to node.** Pods cannot reach the Hetzner metadata service (it holds the original join token and host keys); the k3s join token is rotated once the cluster has formed. The current join token is kept in `sb-system/sb-join` so sb-guard can join a replacement server; a replacement's user data therefore holds the current token, which pods on it cannot read for the same reason. Containers run with privilege escalation off and a reduced capability set.
 6. **Agent to install.** Agent tokens can deploy and configure, but widening access, opening Vaultwarden signups, deleting apps and restoring data need a human approval in the browser: by an admin, or by a member when an admin has allowed that. A solo admin approves their own agent. Removing a member ends their sessions at once and revokes the agent tokens they approved. Approvals go stale when the app changes after the request.
 7. **Install to backup bucket.** Backups are encrypted by restic before upload. The bucket provider sees sizes and timing, not contents. Snapshots also carry each app's secret values, so the bucket plus the encryption password is enough to rebuild the install: treat the password like a root credential.
 
@@ -40,7 +42,7 @@ What SlicedBread protects against, what it does not, and where the trust boundar
 - **Builds run untrusted code.** Each build is its own Job with its own rootless BuildKit (uid 1000, not privileged, no capabilities to the node), so builds are separated from each other and from the node by the container boundary and a user namespace. They need unconfined seccomp and AppArmor to create that user namespace, so `sb-builds` is a privileged Pod Security namespace that only sb-control creates pods in. A kernel exploit from a build step reaches the node.
 - **Malicious template images.** Templates pin upstream images by tag, not by digest.
 - **Denial of service.** No rate limiting beyond what Traefik and Hetzner provide.
-- **Losing the whole Hetzner location or account.** Backups survive if the bucket is elsewhere, but restoring into a new install is a manual process today.
+- **Losing the whole Hetzner location or account.** Backups survive if the bucket is elsewhere; rebuilding means a new `sb init` with the saved backup password and "Recreate all" in the dashboard.
 - **Unpatched OS and images.** Automatic patching and image updates are not built yet.
 - **Alerting reaches you only through the dashboard, `sb alerts` and a webhook you configure.** If the whole install is down, nothing inside it can send an alert; an outside uptime check is still needed for that.
 
