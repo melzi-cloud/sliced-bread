@@ -1,6 +1,6 @@
 apiVersion: bakery.slicedbread.dev/v1
 name: vaultwarden
-version: 1.0.0
+version: 1.1.0
 description: Password manager compatible with Bitwarden apps and browser extensions.
 upstream: {project: Vaultwarden, url: https://github.com/dani-garcia/vaultwarden, licence: AGPL-3.0}
 access:
@@ -30,7 +30,12 @@ settings:
     default: ""
     env: {SIGNUPS_DOMAINS_WHITELIST: "${setting.signup_domain}"}
 forbidEnv: [ADMIN_TOKEN, SIGNUPS_ALLOWED, SIGNUPS_DOMAINS_WHITELIST]
-backup: {consistency: stop, require: [data/db.sqlite3]}
+backup:
+  consistency: stop
+  require: [data/db.sqlite3]
+  # Every restore test runs PRAGMA integrity_check and reports accounts and vault items.
+  sqlite:
+    - {path: data/db.sqlite3, tables: [users, ciphers]}
 actions:
   - name: has_account
     description: Whether at least one Vaultwarden account exists.

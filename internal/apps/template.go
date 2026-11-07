@@ -164,6 +164,15 @@ type BackupSpec struct {
 	Consistency string   `yaml:"consistency,omitempty" json:"consistency,omitempty"` // live | stop
 	Require     []string `yaml:"require,omitempty" json:"require,omitempty"`
 	Exclude     []string `yaml:"exclude,omitempty" json:"exclude,omitempty"`
+	// SQLite files that every restore test opens: PRAGMA integrity_check must return ok
+	// and the named tables must exist (their row counts are reported, not judged).
+	SQLite []SQLiteCheck `yaml:"sqlite,omitempty" json:"sqlite,omitempty"`
+}
+
+// SQLiteCheck is a SQLite database inside a volume (<volume>/<path>) and tables to count.
+type SQLiteCheck struct {
+	Path   string   `yaml:"path" json:"path"`
+	Tables []string `yaml:"tables,omitempty" json:"tables,omitempty"`
 }
 
 // Field is an action input or output.
@@ -320,6 +329,8 @@ var (
 	secretNameRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,62}$`)
 	refRE        = regexp.MustCompile(`\$\{([^}]*)\}`)
 	quantityRE   = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?(m|Mi|Gi|Ki)?$`)
+	sqlitePathRE = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$`)
+	sqlTableRE   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,62}$`)
 )
 
 // DigestPinned reports whether an image reference names a digest.
@@ -510,6 +521,21 @@ func (t *Template) Validate() error {
 			vol, _, _ := strings.Cut(p, "/")
 			if _, ok := volumes[vol]; !ok || strings.Contains(p, "..") {
 				bad("backup path %q must start with a volume name", p)
+			}
+		}
+		seen := map[string]bool{}
+		for _, c := range t.Backup.SQLite {
+			vol, _, _ := strings.Cut(c.Path, "/")
+			if _, ok := volumes[vol]; !ok || !sqlitePathRE.MatchString(c.Path) || strings.Contains(c.Path, "..") {
+				bad("backup.sqlite path %q must be a file in a volume: <volume>/<path>, letters, digits, . _ - and /", c.Path)
+			} else if seen[c.Path] {
+				bad("backup.sqlite path %q is listed twice", c.Path)
+			}
+			seen[c.Path] = true
+			for _, tb := range c.Tables {
+				if !sqlTableRE.MatchString(tb) {
+					bad("backup.sqlite %s: table %q must be a plain name (letters, digits, _)", c.Path, tb)
+				}
 			}
 		}
 	}

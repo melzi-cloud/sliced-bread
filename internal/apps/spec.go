@@ -50,11 +50,13 @@ type App struct {
 	// Backups. BackupStop stops the app while its volumes are copied (for SQLite and similar
 	// files that are unsafe to copy while open). BackupRequire lists files, relative to the
 	// volume root (<volume>/<path>), that a restored backup must contain and be non-empty.
-	BackupStop    bool         `json:"backupStop,omitempty"`
-	BackupRequire []string     `json:"backupRequire,omitempty"`
-	BackupExclude []string     `json:"backupExclude,omitempty"`
-	Paused        bool         `json:"paused,omitempty"` // scaled to 0 for a backup or a restore
-	Backup        *BackupState `json:"backup,omitempty"`
+	// BackupSQLite lists SQLite files the restore test opens and checks.
+	BackupStop    bool          `json:"backupStop,omitempty"`
+	BackupRequire []string      `json:"backupRequire,omitempty"`
+	BackupExclude []string      `json:"backupExclude,omitempty"`
+	BackupSQLite  []SQLiteCheck `json:"backupSQLite,omitempty"`
+	Paused        bool          `json:"paused,omitempty"` // scaled to 0 for a backup or a restore
+	Backup        *BackupState  `json:"backup,omitempty"`
 }
 
 // HasData reports whether the app has anything to back up.
@@ -71,18 +73,54 @@ type BackupState struct {
 
 // BackupRun is one backup, restore test or restore.
 type BackupRun struct {
-	ID         string `json:"id"`
-	Kind       string `json:"kind"`  // backup, test, restore
-	Phase      string `json:"phase"` // stopping, running, succeeded, failed
-	Trigger    string `json:"trigger,omitempty"`
-	Snapshot   string `json:"snapshot,omitempty"`
-	Files      int    `json:"files,omitempty"`
-	Bytes      int64  `json:"bytes,omitempty"`
-	DBTables   int    `json:"dbTables,omitempty"`
-	DBRows     int64  `json:"dbRows,omitempty"`
-	StartedAt  string `json:"startedAt"`
-	FinishedAt string `json:"finishedAt,omitempty"`
-	Message    string `json:"message,omitempty"`
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`  // backup, test, restore
+	Phase    string `json:"phase"` // stopping, running, succeeded, failed
+	Trigger  string `json:"trigger,omitempty"`
+	Snapshot string `json:"snapshot,omitempty"`
+	Files    int    `json:"files,omitempty"`
+	Bytes    int64  `json:"bytes,omitempty"`
+	DBTables int    `json:"dbTables,omitempty"`
+	DBRows   int64  `json:"dbRows,omitempty"`
+	// SQLite: what a restore test found in each of the template's SQLite files.
+	SQLite     []SQLiteResult `json:"sqlite,omitempty"`
+	StartedAt  string         `json:"startedAt"`
+	FinishedAt string         `json:"finishedAt,omitempty"`
+	Message    string         `json:"message,omitempty"`
+}
+
+// SQLiteResult is one SQLite file checked by a restore test.
+type SQLiteResult struct {
+	Path      string           `json:"path"`
+	Integrity string           `json:"integrity"`         // "ok", or what integrity_check or opening the file reported
+	Tables    map[string]int64 `json:"tables,omitempty"`  // row counts of the declared tables
+	Missing   []string         `json:"missing,omitempty"` // declared tables that do not exist
+}
+
+// SQLiteSummary describes SQLite check results in one line, e.g.
+// "sqlite data/db.sqlite3: integrity ok, rows: ciphers 40, users 2".
+func SQLiteSummary(rs []SQLiteResult) string {
+	var parts []string
+	for _, r := range rs {
+		s := "sqlite " + r.Path + ": integrity " + r.Integrity
+		names := make([]string, 0, len(r.Tables))
+		for t := range r.Tables {
+			names = append(names, t)
+		}
+		sort.Strings(names)
+		for i, t := range names {
+			sep := ", "
+			if i == 0 {
+				sep = ", rows: "
+			}
+			s += fmt.Sprintf("%s%s %d", sep, t, r.Tables[t])
+		}
+		if len(r.Missing) > 0 {
+			s += ", missing tables " + strings.Join(r.Missing, " ")
+		}
+		parts = append(parts, s)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // Repo is a git source built with Railpack (or its Dockerfile if present).

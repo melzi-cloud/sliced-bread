@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/melzi-cloud/sliced-bread/internal/apps"
 )
 
 // runBackupCmd handles backups, backup, restore, restore-test and export. ok=false: not ours.
@@ -189,6 +191,7 @@ type runView struct {
 	ID, Phase, Message, Snapshot, FinishedAt string
 	Files, DBTables                          int
 	DBRows                                   int64
+	SQLite                                   []apps.SQLiteResult
 }
 
 func (r runView) line(label string) string {
@@ -202,6 +205,9 @@ func (r runView) line(label string) string {
 		if r.DBTables > 0 {
 			s += fmt.Sprintf(", %d db tables, %d rows", r.DBTables, r.DBRows)
 		}
+	}
+	if len(r.SQLite) > 0 { // shown on failure too: which file failed and how
+		s += ", " + apps.SQLiteSummary(r.SQLite)
 	}
 	return s
 }

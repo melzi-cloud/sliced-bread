@@ -112,11 +112,14 @@ func ApplyTemplate(a *App) error {
 	}
 	a.Generate = mergeGen(t.Secrets.Generate, a.Generate)
 	a.Provide = mergeProvide(t.Secrets.Provide, a.Provide)
-	a.BackupStop, a.BackupRequire, a.BackupExclude = false, nil, nil
+	a.BackupStop, a.BackupRequire, a.BackupExclude, a.BackupSQLite = false, nil, nil, nil
 	if b := t.Backup; b != nil {
 		a.BackupStop = b.Consistency == "stop"
 		a.BackupRequire = append([]string{}, b.Require...)
 		a.BackupExclude = append([]string{}, b.Exclude...)
+		for _, c := range b.SQLite {
+			a.BackupSQLite = append(a.BackupSQLite, SQLiteCheck{Path: c.Path, Tables: append([]string{}, c.Tables...)})
+		}
 	}
 	return nil
 }

@@ -378,3 +378,74 @@ func TestHosts(t *testing.T) {
 		t.Fatalf("long label %q (%d)", label, len(label))
 	}
 }
+
+const sqliteTemplate = `apiVersion: bakery.slicedbread.dev/v1
+name: notes
+version: 0.1.0
+description: test
+upstream: {project: N, url: https://example.com, licence: MIT}
+access: {mode: wall}
+components:
+  - name: web
+    image: example.com/web:1@sha256:0000000000000000000000000000000000000000000000000000000000000001
+    port: 3000
+    volumes: [{name: data, path: /data, size: 1Gi}]
+backup:
+  consistency: stop
+  sqlite:
+    - {path: data/app.db, tables: [users, notes]}
+    - {path: data/sub/cache.sqlite3}
+`
+
+func TestBackupSQLiteValidation(t *testing.T) {
+	tm, err := ParseTemplate([]byte(sqliteTemplate), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Name: "notes", TemplateDef: tm}
+	if err := ApplyTemplate(a); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.BackupSQLite) != 2 || a.BackupSQLite[0].Path != "data/app.db" || strings.Join(a.BackupSQLite[0].Tables, ",") != "users,notes" {
+		t.Fatalf("app carries the template's SQLite checks: %+v", a.BackupSQLite)
+	}
+	cases := map[string]string{
+		"unknown volume":    "{path: logs/app.db}",
+		"volume only":       "{path: data}",
+		"dot dot":           "{path: data/../etc/passwd}",
+		"space":             `{path: "data/my app.db"}`,
+		"colon":             `{path: "data/app.db:x"}`,
+		"absolute":          "{path: /data/app.db}",
+		"bad table":         `{path: data/b.db, tables: ["users; drop table users"]}`,
+		"quoted table":      `{path: data/b.db, tables: ['a"b']}`,
+		"min rows not here": "{path: data/b.db, minRows: {users: 1}}",
+	}
+	for name, entry := range cases {
+		src := strings.Replace(sqliteTemplate, "{path: data/sub/cache.sqlite3}", entry, 1)
+		if _, err := ParseTemplate([]byte(src), nil); err == nil {
+			t.Errorf("%s: should fail", name)
+		}
+	}
+	dup := strings.Replace(sqliteTemplate, "{path: data/sub/cache.sqlite3}", "{path: data/app.db}", 1)
+	if _, err := ParseTemplate([]byte(dup), nil); err == nil || !strings.Contains(err.Error(), "twice") {
+		t.Errorf("duplicate path: %v", err)
+	}
+}
+
+func TestVaultwardenChecksItsSQLite(t *testing.T) {
+	b := Catalog["vaultwarden"].Backup
+	if b == nil || len(b.SQLite) != 1 || b.SQLite[0].Path != "data/db.sqlite3" || strings.Join(b.SQLite[0].Tables, ",") != "users,ciphers" {
+		t.Fatalf("vaultwarden backup: %+v", b)
+	}
+}
+
+func TestSQLiteSummary(t *testing.T) {
+	got := SQLiteSummary([]SQLiteResult{
+		{Path: "data/db.sqlite3", Integrity: "ok", Tables: map[string]int64{"users": 0, "ciphers": 12}},
+		{Path: "data/x.db", Integrity: "ok", Missing: []string{"notes"}},
+	})
+	want := "sqlite data/db.sqlite3: integrity ok, rows: ciphers 12, users 0; sqlite data/x.db: integrity ok, missing tables notes"
+	if got != want {
+		t.Fatalf("got %q", got)
+	}
+}

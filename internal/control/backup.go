@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -18,15 +19,19 @@ import (
 // Backups: every app with a volume or a database gets one restic snapshot per run in an
 // S3-compatible bucket. After each backup a restore test restores that snapshot into a
 // scratch namespace and checks it: restic verifies file contents, required files must be
-// present, and a database dump must load into a fresh Postgres with the same table count.
+// present, SQLite files the template declares must pass PRAGMA integrity_check, and a
+// database dump must load into a fresh Postgres with the same table count.
 
 const (
-	backupSecret     = "sb-backup" // in sb-system: target, keys, restic password, schedule
-	backupEnvSecret  = "sb-backup-env"
-	restoreTestNS    = "sb-restore-test"
-	resticImage      = "restic/restic:0.19.1"
-	postgresImage    = "postgres:18.6"
-	checkImage       = "alpine:3.24.4"
+	backupSecret    = "sb-backup" // in sb-system: target, keys, restic password, schedule
+	backupEnvSecret = "sb-backup-env"
+	restoreTestNS   = "sb-restore-test"
+	resticImage     = "restic/restic:0.19.1"
+	postgresImage   = "postgres:18.6"
+	checkImage      = "alpine:3.24.4"
+	// The official Node image has SQLite built in (node:sqlite); Vaultwarden's actions use
+	// the same image, so it is usually cached on the server already.
+	sqliteImage      = "docker.io/library/node:24.22.2-alpine3.24@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8"
 	historyLimit     = 20
 	backupJobTimeout = 3600
 )
@@ -255,6 +260,78 @@ r forget --host slicedbread --tag "app=$SB_APP" --keep-last 10 --keep-daily 14 -
 		init: inits, main: main, volumes: vols, nodeName: nodeName}.obj()
 }
 
+// sqliteCheckJS checks each SQLite file in SB_SQLITE ("<volume>/<path>:<table>,<table> ...",
+// relative to SB_ROOT) on a copy in a temporary directory, so a write-ahead log or rollback
+// journal in the snapshot is applied the way the app would apply it. It prints
+// SB_SQLITE <json> with every result, and SB_ERROR and exit 1 if a file is missing, does
+// not pass PRAGMA integrity_check, or lacks a declared table. Row counts are reported only:
+// a fresh install legitimately has empty tables.
+const sqliteCheckJS = `const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
+const { DatabaseSync } = require("node:sqlite");
+const root = process.env.SB_ROOT || "/restore/vol";
+const results = [], errors = [];
+for (const spec of (process.env.SB_SQLITE || "").split(/\s+/).filter(Boolean)) {
+  const [file, list = ""] = spec.split(":");
+  const tables = list.split(",").filter(Boolean);
+  const r = { path: file, integrity: "" };
+  results.push(r);
+  const src = path.join(root, file);
+  let st = null;
+  try { st = fs.statSync(src); } catch (e) {}
+  if (!st || !st.isFile() || st.size === 0) {
+    r.integrity = "file missing or empty";
+    errors.push(file + " is missing or empty");
+    continue;
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sqlite-"));
+  for (const suffix of ["", "-wal", "-journal"]) {
+    if (fs.existsSync(src + suffix)) fs.copyFileSync(src + suffix, path.join(dir, "db" + suffix));
+  }
+  let db = null;
+  try {
+    db = new DatabaseSync(path.join(dir, "db"));
+    r.integrity = db.prepare("PRAGMA integrity_check").all().map((row) => String(Object.values(row)[0])).slice(0, 5).join("; ");
+  } catch (e) {
+    r.integrity = String((e && e.message) || e);
+  }
+  r.integrity = r.integrity.replace(/\s+/g, " ").slice(0, 300);
+  if (r.integrity !== "ok") {
+    errors.push(file + " failed PRAGMA integrity_check: " + r.integrity);
+  } else {
+    const have = new Set(db.prepare("select name from sqlite_master where type = 'table'").all().map((row) => row.name));
+    r.tables = {};
+    const missing = [];
+    for (const t of tables) {
+      if (!have.has(t)) { missing.push(t); continue; }
+      r.tables[t] = Number(db.prepare('select count(*) as n from "' + t + '"').get().n);
+    }
+    if (missing.length) {
+      r.missing = missing;
+      errors.push(file + " has no table " + missing.join(", "));
+    }
+  }
+  try { if (db) db.close(); } catch (e) {}
+  fs.rmSync(dir, { recursive: true, force: true });
+  const counts = Object.entries(r.tables || {}).map(([t, n]) => t + " " + n).join(", ");
+  console.log("checked " + file + ": integrity " + r.integrity + (counts ? ", rows: " + counts : ""));
+}
+console.log("SB_SQLITE " + JSON.stringify(results));
+if (errors.length) {
+  console.log("SB_ERROR SQLite " + errors.join("; "));
+  process.exit(1);
+}
+`
+
+// sqliteEnv encodes the template's SQLite checks for sqliteCheckJS. Paths and table names
+// are validated with the template (no spaces, colons or commas).
+func sqliteEnv(checks []apps.SQLiteCheck) string {
+	var specs []string
+	for _, c := range checks {
+		specs = append(specs, c.Path+":"+strings.Join(c.Tables, ","))
+	}
+	return strings.Join(specs, " ")
+}
+
 func restoreTestJob(a *apps.App, run *apps.BackupRun, expectFiles int, expectTables int) kube.Obj {
 	vols := []any{kube.Obj{"name": "restore", "emptyDir": kube.Obj{}}}
 	mounts := []any{kube.Obj{"name": "restore", "mountPath": "/restore"}}
@@ -275,6 +352,15 @@ chmod -R a+rX /restore
 		kube.Obj{"name": "SB_EXPECT_TABLES", "value": strconv.Itoa(expectTables)})
 	init := container("restore", resticImage, restore, env, mounts, 0)
 	init["envFrom"] = []any{envFromSecret()}
+	inits := []any{init}
+	if len(a.BackupSQLite) > 0 {
+		// Runs after the restore, without the backup credentials.
+		sq := container("sqlite", sqliteImage, "", append(append([]any{}, env...),
+			kube.Obj{"name": "SB_SQLITE", "value": sqliteEnv(a.BackupSQLite)},
+			kube.Obj{"name": "SB_ROOT", "value": "/restore/vol"}), mounts, 65534)
+		sq["command"] = []any{"node", "-e", sqliteCheckJS}
+		inits = append(inits, sq)
+	}
 	var main kube.Obj
 	if a.Database {
 		check := `set -eu
@@ -294,7 +380,7 @@ if [ "$t" != "$SB_EXPECT_TABLES" ]; then echo "SB_ERROR restored database has $t
 		main = container("check", checkImage, `echo "files checked"`, env, mounts, 65534)
 	}
 	return jobSpec{name: "restoretest-" + a.Name + "-" + run.ID, ns: restoreTestNS, app: a, run: run,
-		init: []any{init}, main: main, volumes: vols}.obj()
+		init: inits, main: main, volumes: vols}.obj()
 }
 
 func restoreJob(a *apps.App, run *apps.BackupRun) kube.Obj {
@@ -448,7 +534,7 @@ func (s *Server) runOutput(ctx context.Context, ns, job string) map[string]strin
 		return out
 	}
 	name := kube.Str(pods[0], "metadata", "name")
-	for _, c := range []string{"dump", "restore", "restic", "check", "database", "build"} {
+	for _, c := range []string{"dump", "restore", "sqlite", "restic", "check", "database", "build"} {
 		l, err := s.kube.Logs(ctx, ns, name, c, 200)
 		if err != nil {
 			continue
@@ -515,6 +601,9 @@ func (s *Server) checkBackups(ctx context.Context, a *apps.App, c *BackupConfig)
 	run.DBTables, _ = strconv.Atoi(out["SB_DB_TABLES"])
 	run.DBRows, _ = strconv.ParseInt(out["SB_DB_ROWS"], 10, 64)
 	run.Bytes, _ = strconv.ParseInt(out["SB_BYTES"], 10, 64)
+	if v := out["SB_SQLITE"]; v != "" {
+		json.Unmarshal([]byte(v), &run.SQLite)
+	}
 	if run.Kind == "backup" {
 		run.Snapshot = out["SB_SNAPSHOT"]
 	}
@@ -640,7 +729,11 @@ func backupSummary(a *apps.App) string {
 	}
 	if t := b.LastTest; t != nil {
 		if t.Phase == "succeeded" {
-			parts = append(parts, fmt.Sprintf("restore test passed %s", t.FinishedAt))
+			s := fmt.Sprintf("restore test passed %s", t.FinishedAt)
+			if d := testDetail(t); d != "" {
+				s += " (" + d + ")"
+			}
+			parts = append(parts, s)
 		} else {
 			parts = append(parts, fmt.Sprintf("restore test FAILED %s: %s", t.FinishedAt, t.Message))
 		}
@@ -653,6 +746,19 @@ func backupSummary(a *apps.App) string {
 		}
 	}
 	return strings.Join(parts, "; ")
+}
+
+// testDetail is what a restore test found in the data: Postgres tables and rows, SQLite
+// integrity and row counts.
+func testDetail(t *apps.BackupRun) string {
+	var d []string
+	if t.DBTables > 0 {
+		d = append(d, fmt.Sprintf("database %d tables, %d rows", t.DBTables, t.DBRows))
+	}
+	if len(t.SQLite) > 0 {
+		d = append(d, apps.SQLiteSummary(t.SQLite))
+	}
+	return strings.Join(d, "; ")
 }
 
 func short(id string) string {
@@ -705,6 +811,9 @@ func backupShort(a *apps.App, now time.Time) string {
 		tested := "test pending"
 		if b.LastTest != nil && b.LastTest.Phase == "succeeded" && b.LastTest.Snapshot == b.History[0].Snapshot {
 			tested = "tested"
+			if d := testDetail(b.LastTest); d != "" {
+				tested += " (" + d + ")"
+			}
 		}
 		if t, err := time.Parse(time.RFC3339, b.History[0].StartedAt); err == nil {
 			ago := now.Sub(t)

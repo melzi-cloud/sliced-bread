@@ -154,9 +154,13 @@ backup:
   consistency: stop          # live (default) or stop (stop the app while copying, e.g. SQLite)
   require: [data/db.sqlite3] # restore tests fail if missing or empty
   exclude: [data/icon_cache]
+  sqlite:                    # SQLite files every restore test opens
+    - {path: data/db.sqlite3, tables: [users, ciphers]}
 ```
 
 The database is always backed up with `pg_dump` and restore-tested; volumes unless excluded.
+
+`sqlite` lists SQLite databases inside volumes (`<volume>/<path>`; letters, digits, `.`, `_`, `-` and `/`). After restoring a snapshot, the restore test copies each one (with its `-wal` or `-journal` file, so the database is seen the way the app would see it after a hard stop) and fails unless the file exists, is not empty, `PRAGMA integrity_check` returns `ok`, and every table in `tables` exists. The row counts of those tables are reported in `sb backups` and on the dashboard, not judged: a fresh install with no account yet has an empty `users` table, and its first backups must pass. Table names are plain identifiers (letters, digits, `_`). The check runs in the official Node image (`node:sqlite`), without the backup credentials. Pair it with `consistency: stop` unless the app's own writes are safe to copy while it runs; a copy taken in the middle of a write can fail the check.
 
 ## actions
 
@@ -250,7 +254,7 @@ settings:
     default: ""
     env: {SIGNUPS_DOMAINS_WHITELIST: "${setting.signup_domain}"}
 forbidEnv: [ADMIN_TOKEN, SIGNUPS_ALLOWED, SIGNUPS_DOMAINS_WHITELIST]
-backup: {consistency: stop, require: [data/db.sqlite3]}
+backup: {consistency: stop, require: [data/db.sqlite3], sqlite: [{path: data/db.sqlite3, tables: [users, ciphers]}]}
 actions:
   - name: has_account
     description: Whether at least one account exists.
