@@ -31,7 +31,7 @@ Instructions for coding agents working on SlicedBread. Read [docs/architecture.m
 - **DNS:** only create records under `test.slicedbread.dev`. The Cloudflare token can only see the `slicedbread.dev` zone.
 - **Certificates:** smoke tests use Let's Encrypt staging. Only `sb dev prototype up` uses production certificates (one wildcard per tenant).
 - **Every cloud resource must carry** `sb/run-id`, `sb/owner` and `sb/expires-at` labels (DNS records: the same in the record comment). Code that creates an unlabelled resource is a bug.
-- **Always clean up.** Smoke runs destroy what they create, success or failure. `make reaper` deletes expired leftovers and runs automatically before `make e2e-hetzner`. Check `make tenant-list` if a run crashed.
+- **Always clean up.** Smoke runs destroy what they create, success or failure. `make reaper` deletes expired leftovers. It runs automatically before `make e2e-hetzner` and every 15 minutes on the Mac mini (`make reaper-status`; after a reboot someone must run `make reaper-unlock`). Check `make tenant-list` if a run crashed.
 - **Budget:** keep test spend low. Do not raise server types, node counts or TTLs without a reason written in the commit message.
 - **Do not touch** anything on the host outside this repository: no changes to the podman machine or its containers, system services, or other projects.
 - **If something is genuinely blocking** (missing permission, credential, or a decision that needs a human), stop and ask instead of working around it.
@@ -53,5 +53,5 @@ internal/sshx       SSH with pinned host keys
 internal/tenant     Hetzner provisioning, cloud-init, addons, inventory, teardown, reaper
 internal/smoke      L2 smoke test logic
 test/e2e/hetzner    go test entry point for L2 (build tag e2e)
-hack/               secrets-env, scan-secrets
+hack/               secrets-env, scan-secrets, reaper-schedule and reaper-agent (scheduled reaper)
 ```

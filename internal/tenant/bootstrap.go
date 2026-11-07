@@ -7,9 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/melzi-cloud/sliced-bread/internal/labels"
 )
 
 // Kubectl runs "k3s kubectl <args>" on the first node with optional stdin.
@@ -28,7 +29,7 @@ func (st *State) Kubectl(ctx context.Context, args string, stdin []byte) ([]byte
 // Params returns addon template parameters for this tenant.
 func (p *Provisioner) Params(st *State) AddonParams {
 	ap := AddonParams{
-		RunID: st.RunID, Owner: st.Owner, ExpiresAt: strconv.FormatInt(st.ExpiresAt.Unix(), 10),
+		RunID: st.RunID, Owner: st.Owner, ExpiresAt: labels.ExpiryValue(st.ExpiresAt),
 		Location: st.Location, DNSZone: p.Cfg.DNSZone, WildcardDomain: "*." + st.Domain,
 		ACMEServer: p.Cfg.ACMEServer, CertManagerVersion: p.Cfg.CertManagerVersion, HcloudCSIVersion: p.Cfg.HcloudCSIVersion,
 	}

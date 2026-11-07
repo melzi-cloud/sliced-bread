@@ -65,6 +65,26 @@ Every failed e2e run writes cluster state, events and logs to `test/artifacts/<r
 4. Checks that DNS resolves to the load balancer, that HTTPS works with a certificate that chains to the Let's Encrypt staging roots and matches the host, and that internal ports (6443, 10250, NodePorts) are not reachable on the node public IPs.
 5. Destroys everything, including volumes created by Kubernetes, and fails if any labelled resource remains.
 
+## Scheduled reaper
+
+A launchd agent on the Mac mini runs the reaper every 15 minutes.
+
+```sh
+make reaper-schedule     # build sb, install and load the agent (rerun after pulling reaper changes)
+make reaper-unlock       # once after every reboot: unlock the dev keychain for the agent
+make reaper-status       # agent state, last exit code and the end of the log
+make reaper-unschedule   # unload and remove it (the log stays)
+```
+
+How it works:
+
+- The agent is `~/Library/LaunchAgents/dev.slicedbread.reaper.plist`, loaded into the per-user background launchd domain (`user/<uid>`, `LimitLoadToSessionType` `Background`). It runs at load and then every 900 seconds. launchd never starts a second copy while one is running, and the lock above also excludes manual runs.
+- It runs a prebuilt `sb` (no Go toolchain needed) from `~/Library/Application Support/SlicedBread/reaper/`, which holds `bin/sb`, `hack/secrets-env`, `hack/reaper-agent` and a copy of `dev.env`. It cannot run from the checkout: macOS privacy protection blocks launchd jobs from reading `~/Documents`. `make reaper-schedule` refreshes all of it, so run it from the main checkout, not from a worktree that will be removed.
+- Each run appends to `~/Library/Logs/slicedbread-reaper.log`: a start line, the inventory summary (labelled resources, runs, expired runs), one line per deleted run and resource pass, and a `finished, exit N` line. Every line has a timestamp. When the log reaches 1 MB it is moved to `slicedbread-reaper.log.1` (one old copy is kept). A failed run exits non-zero, which `make reaper-status` shows as the last exit code.
+- Keychain: unlock state is per login session, and launchd jobs do not run in the session of your SSH or terminal shell. Unlocking the keychain in your shell does not unlock it for the agent. `make reaper-unlock` asks for the keychain password and hands it to a one-shot job in the agent's session through a FIFO only you can open, so it never appears on a command line or in a file. It stays unlocked for the agent until the next reboot.
+- When the keychain is locked for the agent, the run logs `keychain slicedbread-dev.keychain-db is locked in the reaper's launchd session; run: make reaper-unlock` and exits 3. The background session has no window server, so it fails at once and never waits on a password prompt.
+- Each run is limited to 30 minutes.
+
 ## Network exposure of development tenants
 
 - Nodes have a Hetzner firewall with one inbound rule: SSH from the operator's current public IP. Nothing else is reachable on node public IPs.
@@ -76,7 +96,9 @@ Every failed e2e run writes cluster state, events and logs to `test/artifacts/<r
 
 - Every cloud resource gets the labels `sb/run-id`, `sb/owner` and `sb/expires-at` (unix seconds). DNS records carry the same values in their comment. Volumes created by the CSI driver get them through `volumeExtraLabels`.
 - Default lifetime is 2 hours (`SB_TTL`, maximum 24h).
-- `make reaper` deletes every run that has an expired resource. It runs before every `make e2e-hetzner`. It is not scheduled yet: a launchd job cannot read the keychain unless it is unlocked in that session.
+- `make reaper` deletes every run that has an expired resource. It runs before every `make e2e-hetzner` and every 15 minutes on the Mac mini (see "Scheduled reaper" below), so a run killed mid-way stops billing within about 15 minutes of its expiry.
+- The reaper never deletes a run that has not expired. A run is deleted when one of its resources carries an `sb/expires-at` in the past. Resources without a usable expiry (half-labelled leftovers of a crashed run, stray `_acme-challenge` records, whose expiry is their age plus 2 hours) only count when no resource of the same run carries a future expiry. A run with any resource labelled `sb/expires-at=never` (a real install) is never deleted; the reaper logs it if other resources of that run look expired.
+- Reaper runs never overlap: each holds an exclusive lock on `~/Library/Caches/slicedbread-reaper.lock` (any checkout, manual or scheduled). `make reaper` waits up to 20 minutes for a running one; the scheduled run skips instead.
 - Every run destroys what it created on exit, success or failure. `SB_KEEP_ON_FAILURE=1` keeps a failed tenant for debugging until the reaper removes it.
 - Approximate cost: 3 x cx23 plus lb11 is about EUR 0.045 per hour. A smoke run costs about one cent.
 

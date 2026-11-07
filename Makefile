@@ -2,13 +2,16 @@ SECRETS := hack/secrets-env
 SB      := go run ./cmd/sb
 RUN     ?=
 
-.PHONY: help test build e2e-hetzner e2e-node-loss reaper tenant-up tenant-down tenant-list tenant-ssh check prototype-up control-push
+.PHONY: help test build e2e-hetzner e2e-node-loss reaper reaper-schedule reaper-unschedule reaper-unlock reaper-status tenant-up tenant-down tenant-list tenant-ssh check prototype-up control-push
 
 help:
 	@echo "make test           unit tests and vet (L0)"
 	@echo "make e2e-hetzner    real tenant on Hetzner: create, verify whoami over TLS, destroy (L2)"
 	@echo "make e2e-node-loss  3-node install with Vaultwarden and Umami: power off a server, measure recovery (L2, ~35 min)"
 	@echo "make reaper         delete expired development resources"
+	@echo "make reaper-schedule    run the reaper every 15 minutes (macOS launchd); reaper-unschedule removes it"
+	@echo "make reaper-unlock      unlock the dev keychain for the scheduled reaper (after each reboot)"
+	@echo "make reaper-status      scheduled reaper state and log"
 	@echo "make tenant-up      create a tenant and leave it running (expires after SB_TTL, default 2h)"
 	@echo "make tenant-down RUN=<run-id>"
 	@echo "make tenant-list    list labelled resources by run"
@@ -28,15 +31,29 @@ build:
 
 # Runs the reaper first so leftovers from crashed runs never pile up.
 e2e-hetzner:
-	$(SECRETS) $(SB) dev reap
+	$(SECRETS) $(SB) dev reap -wait 20m
 	$(SECRETS) go test -tags e2e -count=1 -timeout 60m -v -run TestSmoke ./test/e2e/hetzner/
 
 e2e-node-loss: build
-	$(SECRETS) $(SB) dev reap
+	$(SECRETS) $(SB) dev reap -wait 20m
 	$(SECRETS) go test -tags e2e -count=1 -timeout 100m -v -run TestNodeLoss ./test/e2e/hetzner/
 
 reaper:
-	$(SECRETS) $(SB) dev reap
+	$(SECRETS) $(SB) dev reap -wait 20m
+
+# Scheduled reaper: a launchd agent running a prebuilt sb every 15 minutes.
+# See "Scheduled reaper" in docs/development.md.
+reaper-schedule:
+	hack/reaper-schedule install
+
+reaper-unschedule:
+	hack/reaper-schedule uninstall
+
+reaper-unlock:
+	hack/reaper-schedule unlock
+
+reaper-status:
+	hack/reaper-schedule status
 
 tenant-up:
 	$(SECRETS) $(SB) dev tenant up

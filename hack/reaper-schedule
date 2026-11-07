@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# Install, remove, unlock and inspect the scheduled reaper (macOS launchd).
+#
+#   hack/reaper-schedule install     build sb, copy it to the install directory, load the agent
+#   hack/reaper-schedule uninstall   unload the agent, remove the plist and install directory
+#   hack/reaper-schedule unlock      unlock the dev keychain in the agent's launchd session
+#   hack/reaper-schedule status      agent state and the end of the log
+#
+# The agent runs `sb dev reap` every 15 minutes in the per-user background launchd
+# domain (user/<uid>). Notes:
+#   - The install directory is outside ~/Documents: macOS privacy protection blocks
+#     launchd jobs from reading files under ~/Documents, where checkouts live.
+#   - Keychain unlock state is per login session. The agent's session is not the
+#     shell's, so the keychain needs one unlock for it after every reboot (`unlock`).
+#     That session has no window server: a locked keychain fails at once, never prompts.
+# Never prints secrets.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LABEL=dev.slicedbread.reaper
+DEST="$HOME/Library/Application Support/SlicedBread/reaper"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+LOG="$HOME/Library/Logs/slicedbread-reaper.log"
+DOMAIN="user/$(id -u)"
+INTERVAL="${SB_REAPER_INTERVAL:-900}"
+
+KC="${SB_KEYCHAIN:-}"
+if [ -z "$KC" ] && [ -f "$ROOT/dev.env" ]; then
+  KC="$(set -a; . "$ROOT/dev.env"; echo "${SB_KEYCHAIN:-}")"
+fi
+KC="${KC:-$HOME/Library/Keychains/slicedbread-dev.keychain-db}"
+
+die() { echo "reaper-schedule: $*" >&2; exit 1; }
+[ "$(uname -s)" = Darwin ] || die "macOS only (launchd)"
+
+loaded() { launchctl print "$DOMAIN/$1" >/dev/null 2>&1; }
+
+bootout() {
+  loaded "$1" || return 0
+  launchctl bootout "$DOMAIN/$1" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do loaded "$1" || return 0; sleep 1; done
+  die "could not unload $1"
+}
+
+bootstrap() { # plist
+  for _ in 1 2 3 4 5; do
+    launchctl bootstrap "$DOMAIN" "$1" 2>/dev/null && return 0
+    sleep 1
+  done
+  launchctl bootstrap "$DOMAIN" "$1"
+}
+
+xml() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<<"$1"; }
+
+install_agent() {
+  [ -f "$ROOT/dev.env" ] || die "$ROOT/dev.env is missing"
+  mkdir -p "$DEST/bin" "$DEST/hack" "$(dirname "$PLIST")" "$(dirname "$LOG")"
+  echo "building sb into $DEST/bin"
+  (cd "$ROOT" && go build -trimpath -o "$DEST/bin/sb.new" ./cmd/sb)
+  mv -f "$DEST/bin/sb.new" "$DEST/bin/sb"
+  install -m 755 "$ROOT/hack/secrets-env" "$ROOT/hack/reaper-agent" "$DEST/hack/"
+  install -m 600 "$ROOT/dev.env" "$DEST/dev.env"
+  cat >"$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$(xml "$DEST/hack/reaper-agent")</string>
+    <string>run</string>
+  </array>
+  <key>WorkingDirectory</key><string>$(xml "$DEST")</string>
+  <key>StartInterval</key><integer>$INTERVAL</integer>
+  <key>RunAtLoad</key><true/>
+  <key>LimitLoadToSessionType</key><string>Background</string>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>$(xml "$LOG")</string>
+  <key>StandardErrorPath</key><string>$(xml "$LOG")</string>
+</dict>
+</plist>
+EOF
+  plutil -lint -s "$PLIST"
+  bootout "$LABEL"
+  bootstrap "$PLIST"
+  echo "installed $PLIST (every $((INTERVAL / 60)) min, domain $DOMAIN)"
+  echo "log: $LOG"
+  if ! keychain_ok; then
+    echo "the keychain is locked in the agent's session; run: make reaper-unlock"
+  fi
+}
+
+uninstall_agent() {
+  bootout "$LABEL"
+  rm -f "$PLIST"
+  case "$DEST" in
+  */SlicedBread/reaper) rm -rf "${DEST:?}" ;;
+  *) die "unexpected install directory $DEST" ;;
+  esac
+  rmdir "$(dirname "$DEST")" 2>/dev/null || true
+  echo "removed $LABEL; the log stays at $LOG"
+}
+
+# oneshot writes the plist of a one-shot job into dir/label.plist. The job's
+# stdin is the file at stdin-path ("" for none).
+oneshot() { # dir label stdin-path args...
+  local dir=$1 label=$2 stdin=$3
+  shift 3
+  {
+    echo '<?xml version="1.0" encoding="UTF-8"?>'
+    echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    echo "<plist version=\"1.0\"><dict><key>Label</key><string>$label</string>"
+    echo "<key>ProgramArguments</key><array>"
+    for a in "$@"; do echo "<string>$(xml "$a")</string>"; done
+    echo "</array><key>EnvironmentVariables</key><dict><key>SB_KEYCHAIN</key><string>$(xml "$KC")</string></dict>"
+    if [ -n "$stdin" ]; then echo "<key>StandardInPath</key><string>$(xml "$stdin")</string>"; fi
+    echo "<key>RunAtLoad</key><true/><key>LimitLoadToSessionType</key><string>Background</string></dict></plist>"
+  } >"$dir/$label.plist"
+  bootout "$label"
+  bootstrap "$dir/$label.plist"
+}
+
+# oneshot_wait waits for a one-shot job to exit, unloads it and prints its exit code.
+oneshot_wait() { # label
+  local label=$1 out code=""
+  for _ in $(seq 1 30); do
+    out=$(launchctl print "$DOMAIN/$label" 2>/dev/null || true)
+    code=$(sed -n 's/.*last exit code = \([0-9][0-9]*\).*/\1/p' <<<"$out" | head -1)
+    if [ -n "$code" ] && grep -q 'state = not running' <<<"$out"; then
+      break
+    fi
+    code=""
+    sleep 1
+  done
+  launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
+  echo "${code:-timeout}"
+}
+
+# keychain_ok reports whether the keychain is unlocked in the agent's session.
+keychain_ok() {
+  local label=$LABEL-check dir code
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/sb-reaper.XXXXXX")
+  oneshot "$dir" "$label" "" /bin/bash -c 'security show-keychain-info "$SB_KEYCHAIN" >/dev/null 2>&1'
+  code=$(oneshot_wait "$label")
+  rm -rf "${dir:?}"
+  [ "$code" = 0 ]
+}
+
+unlock_agent() {
+  [ -x "$DEST/hack/reaper-agent" ] || die "not installed; run: make reaper-schedule"
+  if keychain_ok; then
+    echo "the keychain is already unlocked for the scheduled reaper"
+    return 0
+  fi
+  local pw label=$LABEL-unlock dir writer code
+  if [ -t 0 ]; then
+    read -r -s -p "password of $(basename "$KC"): " pw
+    echo
+  else
+    read -r pw || true
+  fi
+  # The password reaches the job through a FIFO that only this user can open:
+  # never on a command line, never in a file.
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/sb-reaper.XXXXXX")
+  mkfifo -m 600 "$dir/pw"
+  printf '%s\n' "$pw" >"$dir/pw" &
+  writer=$!
+  pw=""
+  oneshot "$dir" "$label" "$dir/pw" /bin/bash "$DEST/hack/reaper-agent" unlock
+  code=$(oneshot_wait "$label")
+  kill "$writer" 2>/dev/null || true
+  wait "$writer" 2>/dev/null || true
+  rm -rf "${dir:?}"
+  [ "$code" = 0 ] || die "unlock failed (exit $code); see $LOG"
+  echo "keychain unlocked for the scheduled reaper"
+  if loaded "$LABEL"; then
+    launchctl kickstart "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+    echo "started a reaper run; see $LOG"
+  fi
+}
+
+status_agent() {
+  if loaded "$LABEL"; then
+    launchctl print "$DOMAIN/$LABEL" | grep -E "^$(printf '\t')(state|runs|last exit code|run interval) =" || true
+  else
+    echo "$LABEL is not loaded"
+  fi
+  if [ -f "$LOG" ]; then
+    echo "--- $LOG"
+    tail -n "${LINES_SHOWN:-20}" "$LOG"
+  fi
+}
+
+case "${1:-}" in
+install) install_agent ;;
+uninstall) uninstall_agent ;;
+unlock) unlock_agent ;;
+status) status_agent ;;
+*) die "usage: hack/reaper-schedule install|uninstall|unlock|status" ;;
+esac

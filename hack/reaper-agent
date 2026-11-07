@@ -1,0 +1,64 @@
+#!/bin/bash
+# The scheduled reaper, run by launchd from the install directory that
+# `make reaper-schedule` creates (see hack/reaper-schedule and docs/development.md).
+#
+#   reaper-agent run      one reaper run; appends to the log; exit status is the run's
+#   reaper-agent unlock   unlock the keychain in this launchd session, password on stdin
+#
+# Layout of the install directory: bin/sb, hack/secrets-env, hack/reaper-agent, dev.env.
+# Never prints secrets.
+set -uo pipefail
+
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export USER="${USER:-$(id -un)}"
+LOG="${SB_REAPER_LOG:-$HOME/Library/Logs/slicedbread-reaper.log}"
+MAX_LOG_BYTES=$((1024 * 1024)) # one previous file is kept as .1, so at most about 2 MB
+
+KC_ENV="${SB_KEYCHAIN:-}" # set by hack/reaper-schedule for one-shot jobs
+if [ -f "$DIR/dev.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$DIR/dev.env"
+  set +a
+fi
+KC="${KC_ENV:-${SB_KEYCHAIN:-$HOME/Library/Keychains/slicedbread-dev.keychain-db}}"
+
+ts() { local z; z=$(date +%z); printf '%s%s:%s' "$(date +%Y-%m-%dT%H:%M:%S)" "${z:0:3}" "${z:3:2}"; }
+log() { printf '%s %s\n' "$(ts)" "$*"; }
+
+# Size cap: rotate before this run starts writing.
+if [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -ge "$MAX_LOG_BYTES" ]; then
+  mv -f "$LOG" "$LOG.1"
+fi
+exec >>"$LOG" 2>&1
+
+case "${1:-run}" in
+run)
+  log "reaper: start (pid $$)"
+  # This launchd session has no window server, so a locked keychain fails at once
+  # instead of showing a password prompt.
+  if ! security show-keychain-info "$KC" >/dev/null 2>&1; then
+    log "reaper: keychain $(basename "$KC") is locked in the reaper's launchd session; run: make reaper-unlock"
+    log "reaper: finished, exit 3"
+    exit 3
+  fi
+  "$DIR/hack/secrets-env" "$DIR/bin/sb" dev reap -wait 0 -timeout 30m
+  rc=$?
+  log "reaper: finished, exit $rc"
+  exit "$rc"
+  ;;
+unlock)
+  if security unlock-keychain "$KC" >/dev/null 2>&1; then
+    log "reaper: keychain $(basename "$KC") unlocked for the scheduled reaper"
+  else
+    rc=$?
+    log "reaper: could not unlock keychain $(basename "$KC") (exit $rc; wrong password?)"
+    exit "$rc"
+  fi
+  ;;
+*)
+  echo "usage: reaper-agent run|unlock" >&2
+  exit 2
+  ;;
+esac

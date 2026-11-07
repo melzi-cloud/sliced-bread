@@ -25,7 +25,7 @@ const usage = `usage:
   sb dev tenant down <run-id>   delete everything belonging to a run
   sb dev tenant list            list labelled resources grouped by run
   sb dev tenant ssh <run-id> [node]  print an ssh command for a node (default 1)
-  sb dev reap                   delete runs whose resources have expired
+  sb dev reap [-wait 0] [-timeout 0]   delete runs whose resources have expired
   sb dev smoke [-keep-on-failure]   create, verify and destroy a tenant
   sb dev prototype up           tenant + SlicedBread platform with trusted certificates
   sb dev control push <run-id>  rebuild sb-control and roll it out to a running tenant
@@ -67,6 +67,10 @@ func run(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	if args[1] == "reap" {
+		// The scheduled reaper runs from an install directory outside the repository.
+		return reap(ctx, args[2:])
+	}
 	root, err := repoRoot()
 	if err != nil {
 		return err
@@ -78,10 +82,6 @@ func run(args []string) error {
 	p := tenant.New(cfg, filepath.Join(root, tenant.StateRoot))
 
 	switch args[1] {
-	case "reap":
-		runs, err := p.Reap(ctx, time.Now())
-		fmt.Printf("reaped %d run(s) %v\n", len(runs), runs)
-		return err
 	case "smoke":
 		fs := flag.NewFlagSet("smoke", flag.ContinueOnError)
 		keep := fs.Bool("keep-on-failure", false, "leave resources up after a failure")

@@ -444,6 +444,9 @@ type Resource struct {
 	ID     string
 	Name   string
 	Labels map[string]string
+	// Inferred is set when the labels were derived from the name and age (stray
+	// ACME challenge records) rather than written by us when the resource was created.
+	Inferred bool
 }
 
 func (r Resource) String() string { return fmt.Sprintf("%s %s (%s)", r.Kind, r.Name, r.ID) }
@@ -530,6 +533,7 @@ func (p *Provisioner) Inventory(ctx context.Context, selector string) ([]Resourc
 	}
 	for _, r := range recs {
 		l := labels.ParseDNSComment(r.Comment)
+		explicit := l[labels.RunID] != ""
 		switch {
 		case l[labels.RunID] != "":
 			if wantRun != "" && l[labels.RunID] != wantRun {
@@ -549,7 +553,7 @@ func (p *Provisioner) Inventory(ctx context.Context, selector string) ([]Resourc
 		default:
 			continue // not ours
 		}
-		out = append(out, Resource{Kind: "dns_record", ID: r.ID, Name: r.Name, Labels: l})
+		out = append(out, Resource{Kind: "dns_record", ID: r.ID, Name: r.Name, Labels: l, Inferred: !explicit})
 	}
 	return out, nil
 }
@@ -642,23 +646,22 @@ func (p *Provisioner) deleteAll(ctx context.Context, res []Resource) error {
 	return errors.Join(errs...)
 }
 
-// Reap deletes all runs that have at least one expired resource.
+// Reap deletes all runs that ExpiredRuns selects. It never touches a run that
+// has not expired.
 func (p *Provisioner) Reap(ctx context.Context, now time.Time) ([]string, error) {
 	res, err := p.Inventory(ctx, "")
 	if err != nil {
 		return nil, err
 	}
-	expired := map[string]bool{}
+	runs, kept := ExpiredRuns(res, now)
+	total := map[string]bool{}
 	for _, r := range res {
-		if labels.Expired(r.Labels, now) && labels.ValidRunID(r.Labels[labels.RunID]) {
-			expired[r.Labels[labels.RunID]] = true
-		}
+		total[r.Labels[labels.RunID]] = true
 	}
-	var runs []string
-	for id := range expired {
-		runs = append(runs, id)
+	p.Logf("[reaper] %d labelled resources in %d runs, %d expired", len(res), len(total), len(runs))
+	for _, k := range kept {
+		p.Logf("[reaper] keeping run %s: %s", k.RunID, k.Reason)
 	}
-	sort.Strings(runs)
 	var errs []error
 	for _, id := range runs {
 		p.Logf("[reaper] run %s expired, deleting", id)
@@ -667,4 +670,67 @@ func (p *Provisioner) Reap(ctx context.Context, now time.Time) ([]string, error)
 		}
 	}
 	return runs, errors.Join(errs...)
+}
+
+// Kept is a run with an expired-looking resource that the reaper leaves alone.
+type Kept struct {
+	RunID  string
+	Reason string
+}
+
+// ExpiredRuns returns the runs to delete. A run is deleted when one of its
+// resources carries an expiry that has passed. Resources without a usable expiry
+// (half-labelled leftovers of a crashed run, stray ACME challenge records whose
+// expiry is inferred from their age) only count when no resource of the run says
+// it is still live. A run with any resource labelled sb/expires-at=never is a real
+// install and is never deleted.
+func ExpiredRuns(res []Resource, now time.Time) (runs []string, kept []Kept) {
+	type run struct{ never, expired, live, unlabelled bool }
+	byRun := map[string]*run{}
+	for _, r := range res {
+		id := r.Labels[labels.RunID]
+		if !labels.ValidRunID(id) {
+			continue
+		}
+		st := byRun[id]
+		if st == nil {
+			st = &run{}
+			byRun[id] = st
+		}
+		v := r.Labels[labels.ExpiresAt]
+		ts, err := strconv.ParseInt(v, 10, 64)
+		switch {
+		case v == labels.Never:
+			st.never = true
+		case r.Inferred || err != nil:
+			st.unlabelled = st.unlabelled || labels.Expired(r.Labels, now)
+		case now.Unix() >= ts:
+			st.expired = true
+		default:
+			st.live = true
+		}
+	}
+	ids := make([]string, 0, len(byRun))
+	for id := range byRun {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		st := byRun[id]
+		switch {
+		case st.never:
+			if st.expired || st.unlabelled {
+				kept = append(kept, Kept{id, "a resource is labelled " + labels.ExpiresAt + "=" + labels.Never + " (real install) and others look expired; fix their labels"})
+			}
+		case st.expired:
+			runs = append(runs, id)
+		case st.live:
+			if st.unlabelled {
+				kept = append(kept, Kept{id, "a resource has no usable expiry (or is an old ACME challenge record) but the run has not expired"})
+			}
+		case st.unlabelled:
+			runs = append(runs, id)
+		}
+	}
+	return runs, kept
 }
