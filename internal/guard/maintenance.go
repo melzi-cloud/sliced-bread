@@ -452,6 +452,7 @@ func (g *Guard) applyUpdates(ctx context.Context, info *tenant.ClusterInfo, node
 		if n.Name == os.Getenv("NODE_NAME") && clean {
 			// The reboot may end this process; record a finished install first.
 			st.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+			g.saveMaint(ctx, st)
 		}
 		took, err := g.rebootNode(ctx, info, n.Name, st)
 		res = st.Nodes[n.Name]
@@ -519,8 +520,10 @@ cat > /etc/needrestart/conf.d/50-slicedbread.conf <<'EOF'
 $nrconf{restart} = 'a';
 $nrconf{kernelhints} = 0;
 $nrconf{ucodehints} = 0;
-# k3s runs the cluster on this server; it restarts with the server's reboot instead.
+# k3s runs the cluster on this server and hc-net-ifup the private network (like ifup,
+# which needrestart already leaves alone); both restart with the server's reboot instead.
 $nrconf{override_rc}{qr(^k3s)} = 0;
+$nrconf{override_rc}{qr(^hc-net-)} = 0;
 EOF
 systemctl enable --now apt-daily.timer >/dev/null 2>&1 || true
 out=$(unattended-upgrade --dry-run -v 2>&1 || true)
@@ -977,7 +980,8 @@ func (g *Guard) finishLeftovers(ctx context.Context, info *tenant.ClusterInfo, l
 		res := st.Nodes[v.Name]
 		if v.Ready && bootID(n) != old {
 			res.RebootNeeded, res.LastRebootAt = false, time.Now().UTC().Format(time.RFC3339)
-			g.mlog(st, "%s: rebooted and back (finished by a new guard)", v.Name)
+			res.LastRebootFor = time.Since(at).Round(time.Second).String() // includes moving its apps
+			g.mlog(st, "%s: rebooted and back after %s (finished by a new guard)", v.Name, res.LastRebootFor)
 		} else {
 			res.Error = "did not come back within 15 minutes after the reboot"
 			g.mlog(st, "%s: %s", v.Name, res.Error)

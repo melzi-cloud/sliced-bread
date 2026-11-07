@@ -137,6 +137,9 @@ func TestOSUpdates(t *testing.T) {
 	run("wait", "vault", "--timeout", "10m")
 	run("wait", "analytics", "--timeout", "15m")
 
+	if !created {
+		h.resetBackups()
+	}
 	var login struct{ URL, Email, Password string }
 	b, err := os.ReadFile(filepath.Join(st.Dir, "admin-login.json"))
 	if err != nil || json.Unmarshal(b, &login) != nil {
@@ -150,17 +153,6 @@ func TestOSUpdates(t *testing.T) {
 		return url.Values{"endpoint": {s3.endpoint}, "bucket": {s3.bucket}, "region": {s3.region}, "prefix": {prefix},
 			"key": {s3.key}, "secret": {secret}}
 	}
-	h.mustPost(d, "/settings/backups", target(s3.secret), "Backups configured")
-	h.step("backups configured in the dashboard to %s/%s", s3.bucket, prefix)
-	h.waitFor("first backup and restore test of every app with data", 20*time.Minute, func() (bool, string) {
-		var waiting []string
-		for _, a := range h.apps() {
-			if g, why := apps.UpdateGate(a, time.Now().Add(-24*time.Hour), time.Now()); g != apps.GateOK && a.HasData() {
-				waiting = append(waiting, a.Name+": "+why)
-			}
-		}
-		return len(waiting) == 0, strings.Join(waiting, "; ")
-	})
 
 	h.onNodes("setup", func(i int, out string) {
 		if !strings.Contains(out, "active") {
@@ -174,15 +166,27 @@ func TestOSUpdates(t *testing.T) {
 		}
 	}
 	h.onNodes("publish", nil)
-	h.step("published sbdummy 2 in the local repository of every server")
+	h.step("sbdummy 1 installed and running on every server; published sbdummy 2 in their local repositories")
 
 	// --- 1. a failed backup postpones the updates and raises an alert ---
+	// Backups are set up with a wrong bucket key, so no app has a backup yet and every
+	// backup the run asks for fails.
 	bad := make([]byte, 12)
 	rand.Read(bad)
 	h.mustPost(d, "/settings/backups", target("wrong-"+hex.EncodeToString(bad)), "Backups configured")
+	h.step("backups configured in the dashboard to %s/%s with a wrong secret key", s3.bucket, prefix)
+	h.waitFor("the first backups to fail", 10*time.Minute, func() (bool, string) {
+		var waiting []string
+		for _, a := range h.apps() {
+			if b := a.Backup; a.HasData() && (b == nil || b.LastBackup == nil || b.LastBackup.Phase != "failed") {
+				waiting = append(waiting, a.Name)
+			}
+		}
+		return len(waiting) == 0, strings.Join(waiting, ", ")
+	})
 	t1 := time.Now().UTC().Truncate(time.Second)
 	h.mustPost(d, "/settings/maintenance", nil, "OS maintenance requested")
-	h.step("bucket key broken; Run OS maintenance now pressed at %s", t1.Format(time.RFC3339))
+	h.step("Run OS maintenance now pressed at %s", t1.Format(time.RFC3339))
 	var m *guard.MaintState
 	h.waitFor("the run to postpone the updates", 25*time.Minute, func() (bool, string) {
 		m = h.maint()
@@ -192,14 +196,21 @@ func TestOSUpdates(t *testing.T) {
 		t.Errorf("postponed for the wrong reason: %s", m.Postponed.Reason)
 	}
 	h.step("updates postponed: %s", m.Postponed.Reason)
+	// The first failure postpones the run; other apps' backups may still be running then.
 	failedForUpdates := 0
 	for _, a := range h.apps() {
-		if b := a.Backup; a.HasData() && b != nil && b.LastBackup != nil && b.LastBackup.Trigger == "before OS updates" && b.LastBackup.Phase == "failed" {
+		if !a.HasData() || a.Backup == nil {
+			continue
+		}
+		if lb := a.Backup.LastBackup; lb != nil && lb.Trigger == "before OS updates" && lb.Phase == "failed" && !logTime(lb.StartedAt+" ").Before(t1) {
 			failedForUpdates++
+			h.step("%s: backup %s (%s) failed: %s", a.Name, lb.StartedAt, lb.Trigger, lb.Message)
+		} else if r := a.Backup.Running; r != nil {
+			h.step("%s: %s %s still running when the run was postponed", a.Name, r.Kind, r.Trigger)
 		}
 	}
 	if failedForUpdates == 0 {
-		t.Error("no backup was started before the updates (and failed)")
+		t.Error("no backup started for the updates failed")
 	}
 	h.waitFor("the postponed alert", 3*time.Minute, func() (bool, string) {
 		a := h.openAlerts()
@@ -217,7 +228,7 @@ func TestOSUpdates(t *testing.T) {
 	h.mustPost(d, "/settings/backups", target(s3.secret), "Backups configured")
 	t2 := time.Now().UTC().Truncate(time.Second)
 	h.mustPost(d, "/settings/maintenance", nil, "OS maintenance requested")
-	h.step("bucket key fixed; Run OS maintenance now pressed at %s", t2.Format(time.RFC3339))
+	h.step("bucket key fixed in the dashboard; Run OS maintenance now pressed at %s", t2.Format(time.RFC3339))
 	var atUpdating []*apps.App
 	h.waitFor("backups and restore tests before the updates", 60*time.Minute, func() (bool, string) {
 		m = h.maint()
@@ -480,9 +491,29 @@ func (h *osHarness) apps() []*apps.App {
 	return out
 }
 
+// resetBackups forgets the backup state of a reused install's apps, so the run starts
+// like a new install: no app has a backup yet.
+func (h *osHarness) resetBackups() {
+	h.waitFor("no backup running on the reused install", 15*time.Minute, func() (bool, string) {
+		for _, a := range h.apps() {
+			if a.Backup != nil && a.Backup.Running != nil {
+				return false, a.Name + " " + a.Backup.Running.Kind
+			}
+		}
+		return true, ""
+	})
+	h.kubectl("-n sb-system delete configmap sb-backup-request --ignore-not-found")
+	for _, a := range h.apps() {
+		if a.Backup != nil {
+			h.kubectl("patch apps.slicedbread.dev " + a.Name + ` --type=json -p '[{"op":"remove","path":"/spec/backup"}]'`)
+		}
+	}
+	h.step("reused install: backup state of every app cleared")
+}
+
 func (h *osHarness) maint() *guard.MaintState {
 	m := &guard.MaintState{}
-	json.Unmarshal(h.kubectl(`-n sb-system get configmap sb-maintenance -o jsonpath={.data.state\.json}`), m)
+	json.Unmarshal(h.kubectl(`-n sb-system get configmap sb-maintenance -o 'jsonpath={.data.state\.json}'`), m)
 	return m
 }
 
