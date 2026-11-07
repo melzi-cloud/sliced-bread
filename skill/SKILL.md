@@ -21,6 +21,8 @@ The tenant is shared: the user or other agents may deploy apps while you work. O
 
 Output is human-readable. Add `--json` to any command for JSON. `sb <command> --help` shows that command's usage.
 
+If there is no SlicedBread install yet and the user asks for one, see "Installing" below.
+
 If `sb whoami` fails with "not logged in", ask the user for the API URL (`https://api.<tenant-domain>`) and run `sb login --api <url>`. It prints a link and a code; give both to the user, who signs in and clicks Allow. The CLI then stores its own agent token. Never ask the user to paste a token into the chat.
 
 ## Choosing how to deploy
@@ -151,9 +153,34 @@ Signups close automatically 15 minutes after the change is applied (that is, aft
 
 Tell the user: in the Bitwarden app or browser extension, choose "Self-hosted" and enter the app URL.
 
-## Data and storage
+## Data and backups
 
-Templates that keep data (Vaultwarden, Umami's Postgres) use persistent volumes that survive restarts, redeploys and node failures. Deleting an app deletes its data. This prototype does not take backups yet, so tell the user not to store anything they cannot lose. `sb status <app>` shows a storage line.
+Templates that keep data (Vaultwarden, Umami's Postgres) use persistent volumes that survive restarts and redeploys. Deleting an app deletes its data.
+
+When backups are configured (`sb backups` says so), every app with a volume or database is backed up daily, and **each backup is followed by a restore test** that restores it into a scratch namespace and checks it. New apps get their first backup soon after they are ready.
+
+```sh
+sb backups                 # target, schedule, per app: last backup and last restore test
+sb backups <app>           # plus the list of snapshots
+sb backup <app> --wait     # back up now (then the restore test runs); exit 1 if either fails
+sb restore <app> [--snapshot ID] --wait   # replace the app's data with a snapshot (default: latest)
+```
+
+- A restore stops the app, replaces its volumes and database, and starts it again. With an agent token it needs human approval (exit code 3); tell the user what will be lost (everything since that snapshot).
+- Apps that keep SQLite files (Vaultwarden) are stopped for a few seconds during each backup. `sb status` then shows `paused`; it resumes by itself.
+- If backups are not configured, tell the user: an admin runs `sb backups configure` (or passed backup flags to `sb init`). Until then nothing is backed up.
+- `sb export <dir>` (admin token) writes every app as plain Kubernetes manifests.
+
+## Installing
+
+Only when the user asks for a new install. It runs from the user's machine against their own Hetzner account and Cloudflare domain:
+
+```sh
+sb init --domain apps.example.com --email you@example.com --size 1 \
+  [--backup-endpoint https://<s3 endpoint> --backup-bucket <bucket>]
+```
+
+Secrets come from environment variables, never flags: `HCLOUD_TOKEN`, `CLOUDFLARE_API_TOKEN`, and for backups `SB_BACKUP_ACCESS_KEY_ID` and `SB_BACKUP_SECRET_ACCESS_KEY`. Never print them. `--size 1` is one server (about EUR 7/month, no high availability), `--size 3` is three servers and a load balancer (about EUR 29/month). It takes about 10 minutes, then the CLI is logged in with an admin token. Tell the user where the dashboard login and the backup encryption password were saved (printed at the end), and that `sb destroy <install-id>` removes everything.
 
 ## Troubleshooting
 

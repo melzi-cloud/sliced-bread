@@ -86,7 +86,8 @@ Secrets (read from the environment, or prompted for on a terminal):
   SB_EAB_KID, SB_EAB_HMAC  external account binding for --fallback-issuer (optional).
   SB_BACKUP_ACCESS_KEY_ID, SB_BACKUP_SECRET_ACCESS_KEY  S3 keys for --backup-bucket (recommended: a bucket
                          in another location, e.g. Cloudflare R2 or Hetzner Object Storage).
-Sizes: 1 node (about EUR 4/month, no high availability) or 3 nodes plus a load balancer (about EUR 32/month).`
+Sizes (Hetzner prices incl. VAT, nbg1, cx23): 1 node about EUR 7/month (no high availability); 3 nodes plus a
+load balancer about EUR 29/month. Each app volume and database adds about EUR 0.77/month (10 GB volume).`
 
 func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
@@ -179,9 +180,9 @@ func runInit(args []string) error {
 			return &exitErr{exitError, fmt.Sprintf("DNS record %s already exists; use another base domain or remove it", r.Name)}
 		}
 	}
-	cost := "about EUR 32/month (3 x " + *serverType + " + lb11)"
+	cost := "about EUR 29/month with cx23 (3 servers + load balancer), plus EUR 0.77/month per app volume or database"
 	if *size == 1 {
-		cost = "about EUR 4/month (1 x " + *serverType + ", no high availability)"
+		cost = "about EUR 7/month with cx23 (1 server, no high availability), plus EUR 0.77/month per app volume or database"
 	}
 	fmt.Fprintf(os.Stderr, "\ninstall: %d node(s) in %s, apps at https://<app>.%s (Cloudflare zone %s), %s\n", *size, *location, *domain, zone.Name, cost)
 	if !*yes && !confirm("create it?") {

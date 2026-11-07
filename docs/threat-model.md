@@ -1,0 +1,45 @@
+# Threat model
+
+What SlicedBread protects against, what it does not, and where the trust boundaries are. Applies to self-hosted installs (D-021). Last reviewed 2026-11-06.
+
+## Assets
+
+| Asset | Where it lives |
+|---|---|
+| App data | Hetzner volumes and Postgres in the install's cluster; backups in the user's S3 bucket |
+| Hetzner and Cloudflare tokens | Secrets in the cluster (`sb-system/sb-provider`, `kube-system/hcloud`, `cert-manager/cloudflare-api-token`) |
+| Backup keys and encryption password | Secret `sb-system/sb-backup`, copied as `sb-backup-env` into namespaces that run backup jobs; the password is also shown once to the admin |
+| TLS private keys | Secrets in the cluster; never leave it |
+| Admin and agent API tokens | The user's machine (`~/.config/slicedbread`); hashes in `sb-system/sb-auth` |
+| Login sessions | Signed, host-only browser cookies |
+
+## Trust boundaries
+
+1. **Internet to the install.** Only 80 and 443 are reachable (3 nodes: through the load balancer; 1 node: on the server). SSH is open only to the IP address `sb init` ran from. The Kubernetes API and kubelet are not reachable from the internet (checked by the smoke test).
+2. **Browser to apps.** `wall` apps require a session. The auth host issues a one-time exchange token per app host; each app host gets its own `__Host-` cookie that other hosts, including sibling subdomains and other installs under the same parent domain, cannot set, read or shadow. SlicedBread cookies are removed before requests reach apps.
+3. **App to app.** Each app has its own namespace with a NetworkPolicy that only admits traffic from the same app, the platform and apps that explicitly reference it with `${apps.<name>.internal}`. App pods get no service account token.
+4. **App to node.** Pods cannot reach the Hetzner metadata service (it holds the original join token and host keys); the k3s join token is rotated once the cluster has formed. Containers run with privilege escalation off and a reduced capability set.
+5. **Agent to install.** Agent tokens can deploy and configure, but widening access, opening Vaultwarden signups, deleting apps and restoring data need a human approval in the browser. Approvals go stale when the app changes after the request.
+6. **Install to backup bucket.** Backups are encrypted by restic before upload. The bucket provider sees sizes and timing, not contents.
+
+## In scope
+
+- Opportunistic scanning and exploitation of exposed internal tools (the main reason for private-by-default).
+- A compromised or malicious app trying to reach other apps, steal sessions, or take over the cluster through metadata.
+- A coding agent making a destructive or exposing change the user did not intend.
+- Losing a server (3 nodes), losing app data by mistake (`sb restore`), and backups that silently stopped working (restore test after every backup).
+
+## Out of scope or not yet handled
+
+- **A compromised app escaping its container to the node.** Apps share nodes and run as root inside their containers. A kernel or container runtime escape gives access to the node, its secrets and other apps. Run only software you would run on a server you own.
+- **Theft of the user's machine or tokens.** The admin token and the Hetzner token give full control. Use a dedicated Hetzner project.
+- **The image registry inside the cluster** has no authentication; any pod can push or pull images.
+- **Malicious template images.** Templates pin upstream images by tag, not by digest.
+- **Denial of service.** No rate limiting beyond what Traefik and Hetzner provide.
+- **Losing the whole Hetzner location or account.** Backups survive if the bucket is elsewhere, but restoring into a new install is a manual process today.
+- **Unpatched OS and images.** Automatic patching and image updates are not built yet.
+- **Alerting.** Failures are visible in `sb backups` and `sb status`, but nobody is notified.
+
+## Reporting
+
+Report security issues privately to the maintainers before opening a public issue.

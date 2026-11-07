@@ -1,6 +1,6 @@
 # SlicedBread TODO
 
-Status (2026-11-06, implementation thread): items 1 (placement group), 2 (metadata block, CSI hostNetwork, token rotation) and 3 (cross-app internal URLs) are implemented; 1 and 2 are verified by the smoke test. Item 4 (components and replicas) is open and needs a design decision. Item 5 (cookie hardening) is open. See also [hosting-modes.md](hosting-modes.md).
+Status (2026-11-06, implementation thread): items 1 (placement group), 2 (metadata block, CSI hostNetwork, token rotation) and 3 (cross-app internal URLs) are implemented; 1 and 2 are verified by the smoke test. Item 4 (components and replicas) is open and needs a design decision. Item 5 (cookie hardening) is done: `__Host-` cookies, per-host session exchange, session-bound CSRF, signatures cover the install domain and host (tested in `TestConflictingParentDomainCookies` and live). See also [hosting-modes.md](hosting-modes.md).
 
 Written 2026-11-06 against `main` at `3a1af24`, from the user stories review (`/tmp/slicedbread-user-stories/index.html`).
 This file lives in `/tmp` and macOS clears `/tmp` on reboot. The implementation thread should copy it into the repo (for example `docs/todo.md`) and keep it there.

@@ -101,3 +101,17 @@ The prototype's main QA loop is an LLM agent operating a live tenant with nothin
 1. `make prototype-up`, then copy `bin/sb`, `skill/SKILL.md` and `.sb/runs/<id>/cli-agent.json` into an empty directory.
 2. Give a subagent a user request ("here's my Lovable export, run it, team only"), the paths, and rules: only the CLI, the skill file and the user's project; no source code, kubectl or SSH; never print secrets.
 3. Ask for a report: commands and results, final state, and every point of confusion. Fix the product, not the agent.
+
+## Testing `sb init` (self-hosted installs)
+
+`sb init` is the user-facing installer. To test it with development credentials, use a name under `test.slicedbread.dev` as the user's domain and label the resources to expire, so the reaper removes them if a test is abandoned:
+
+```sh
+make build
+SB_STATE_DIR=$PWD/.sb/installs SB_CONFIG=$PWD/.sb/cli/one.json \
+  hack/secrets-env bin/sb init --domain one.test.slicedbread.dev --email admin@example.com --size 1 --yes --expire-after 4h
+```
+
+`hack/secrets-env` provides `HCLOUD_TOKEN` and `CF_API_TOKEN` (which `sb init` accepts as the Cloudflare token). For backups to the dev bucket, map `SB_S3_ACCESS_KEY`/`SB_S3_SECRET_KEY` to `SB_BACKUP_ACCESS_KEY_ID`/`SB_BACKUP_SECRET_ACCESS_KEY` and use `--backup-endpoint https://s3.duti.dev --backup-bucket sb-dev --backup-region garage --backup-prefix test/<name>` (endpoint and bucket are in `dev.env`).
+
+Install state (SSH key, credentials) lives in `SB_STATE_DIR` (default `~/.config/slicedbread/installs`). `sb upgrade <id>` pushes a rebuilt sb-control, `sb ssh <id>` prints an SSH command, `sb destroy <id> --yes` removes everything. Real installs are labelled `sb/expires-at=never` and are never reaped.
