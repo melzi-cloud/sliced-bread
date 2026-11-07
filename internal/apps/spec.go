@@ -33,16 +33,26 @@ type App struct {
 	HealthPath  string            `json:"healthPath,omitempty"`
 	RunAsUser   int64             `json:"runAsUser,omitempty"`
 	Settings    map[string]string `json:"settings,omitempty"`
-	Generated   []string          `json:"generated,omitempty"` // secret keys generated on first deploy
-	Build       *BuildState       `json:"build,omitempty"`
-	Hooks       map[string]string `json:"hooks,omitempty"` // template hook progress, e.g. umami admin password set
-	Generation  int64             `json:"generation,omitempty"`
+	// Generate lists secrets sb-control creates once with its own random number generator;
+	// Provide lists secrets a human enters in the dashboard (D-030: agents never see or
+	// write secret values).
+	Generate []GenSecret     `json:"generate,omitempty"`
+	Provide  []ProvideSecret `json:"provide,omitempty"`
+	// Template apps: the template the app was created from (with its scripts and files),
+	// its version, and paths that need the login wall even when the app is not walled.
+	TemplateDef     *Template         `json:"templateDef,omitempty"`
+	TemplateVersion string            `json:"templateVersion,omitempty"`
+	WallPaths       []string          `json:"wallPaths,omitempty"`
+	Build           *BuildState       `json:"build,omitempty"`
+	Hooks           map[string]string `json:"hooks,omitempty"` // template hook progress, e.g. umami admin password set
+	Generation      int64             `json:"generation,omitempty"`
 
 	// Backups. BackupStop stops the app while its volumes are copied (for SQLite and similar
 	// files that are unsafe to copy while open). BackupRequire lists files, relative to the
 	// volume root (<volume>/<path>), that a restored backup must contain and be non-empty.
 	BackupStop    bool         `json:"backupStop,omitempty"`
 	BackupRequire []string     `json:"backupRequire,omitempty"`
+	BackupExclude []string     `json:"backupExclude,omitempty"`
 	Paused        bool         `json:"paused,omitempty"` // scaled to 0 for a backup or a restore
 	Backup        *BackupState `json:"backup,omitempty"`
 }
@@ -128,6 +138,9 @@ func (a *App) Validate() error {
 		return fmt.Errorf("app name %q is reserved", a.Name)
 	}
 	sources := 0
+	if a.TemplateDef != nil {
+		sources++
+	}
 	if a.Image != "" {
 		sources++
 	}
@@ -162,9 +175,19 @@ func (a *App) Validate() error {
 			return fmt.Errorf("invalid env key %q", k)
 		}
 	}
-	for _, p := range a.PublicPaths {
-		if !strings.HasPrefix(p, "/") || strings.ContainsAny(p, " \t\n`\"'") {
-			return fmt.Errorf("invalid public path %q", p)
+	for _, p := range append(append([]string{}, a.PublicPaths...), a.WallPaths...) {
+		if !validPath(p) {
+			return fmt.Errorf("invalid path %q", p)
+		}
+	}
+	for _, g := range a.Generate {
+		if !envKeyRE.MatchString(g.Name) {
+			return fmt.Errorf("invalid secret name %q", g.Name)
+		}
+	}
+	for _, p := range a.Provide {
+		if !envKeyRE.MatchString(p.Name) {
+			return fmt.Errorf("invalid secret name %q", p.Name)
 		}
 	}
 	return nil
@@ -224,6 +247,9 @@ func (a *App) RemoveSecretKey(key string) {
 
 // CurrentImage is the image the deployment should run, or "" if a repo app has no successful build yet.
 func (a *App) CurrentImage() string {
+	if a.TemplateDef != nil && len(a.TemplateDef.Components) > 0 {
+		return a.TemplateDef.Components[0].Image
+	}
 	if a.Builds() {
 		if a.Build != nil {
 			return a.Build.LastGood

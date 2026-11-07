@@ -256,17 +256,19 @@ func (s *Server) putApp(ctx context.Context, a *apps.App) error {
 
 // Approval is a pending privileged change requested with an agent token.
 type Approval struct {
-	ID          string    `json:"id"`
-	App         string    `json:"app"`
-	Kind        string    `json:"kind"`               // create, update, delete, restore
-	Snapshot    string    `json:"snapshot,omitempty"` // restore only
-	Summary     string    `json:"summary"`            // human readable
-	Desired     *apps.App `json:"desired,omitempty"`
-	BaseGen     int64     `json:"baseGeneration"` // app generation the request was based on; 0 for create
-	RequestedBy string    `json:"requestedBy,omitempty"`
-	RequestedAt string    `json:"requestedAt"`
-	State       string    `json:"state"` // pending, approved, denied
-	Result      string    `json:"result,omitempty"`
+	ID          string            `json:"id"`
+	App         string            `json:"app"`
+	Kind        string            `json:"kind"`               // create, update, delete, restore
+	Snapshot    string            `json:"snapshot,omitempty"` // restore only
+	Action      string            `json:"action,omitempty"`   // action only
+	Input       map[string]string `json:"input,omitempty"`
+	Summary     string            `json:"summary"` // human readable
+	Desired     *apps.App         `json:"desired,omitempty"`
+	BaseGen     int64             `json:"baseGeneration"` // app generation the request was based on; 0 for create
+	RequestedBy string            `json:"requestedBy,omitempty"`
+	RequestedAt string            `json:"requestedAt"`
+	State       string            `json:"state"` // pending, approved, denied
+	Result      string            `json:"result,omitempty"`
 }
 
 func (s *Server) saveApproval(ctx context.Context, ap *Approval) error {
@@ -374,6 +376,16 @@ func (s *Server) executeApproval(ctx context.Context, ap *Approval) error {
 		_, err = s.startBackupRun(ctx, cur, "restore", "approved "+ap.ID, ap.Snapshot)
 	case "recreate":
 		_, err = s.recreateLocked(ctx, map[string]string{ap.App: ap.Snapshot})
+	case "action":
+		s.mu.Unlock()
+		var res *ActionResult
+		res, err = s.runAction(ctx, cur, ap.Action, ap.Input)
+		s.mu.Lock()
+		if err == nil {
+			b, _ := json.Marshal(res.Result)
+			ap.State, ap.Result = "approved", "done: "+string(b)
+			return s.saveApproval(ctx, ap)
+		}
 	case "create", "update":
 		if ap.Desired == nil {
 			return fmt.Errorf("approval has no desired state")
@@ -383,7 +395,12 @@ func (s *Server) executeApproval(ctx context.Context, ap *Approval) error {
 			ap.Desired.Build, ap.Desired.Hooks, ap.Desired.Generation = cur.Build, cur.Hooks, cur.Generation
 			ap.Desired.Upload, ap.Desired.Repo = cur.Upload, cur.Repo
 			ap.Desired.Backup, ap.Desired.Paused = cur.Backup, cur.Paused
-			if cur.Template == "" {
+			if cur.TemplateDef != nil {
+				ap.Desired.TemplateDef, ap.Desired.TemplateVersion = cur.TemplateDef, cur.TemplateVersion
+				if err := apps.ApplyTemplate(ap.Desired); err != nil {
+					return err
+				}
+			} else {
 				ap.Desired.Image = cur.Image
 			}
 		}

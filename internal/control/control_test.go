@@ -254,13 +254,12 @@ func TestNeedsApproval(t *testing.T) {
 	if why := needsApproval(ScopeAgent, nil, v); why != "" {
 		t.Fatalf("template-defined app-auth needs no approval, got %s", why)
 	}
-	open := cloneApp(v)
-	open.Settings["signups"] = "true"
-	if needsApproval(ScopeAgent, v, open) == "" {
-		t.Fatal("opening vaultwarden signups needs approval")
-	}
-	if needsApproval(ScopeAgent, open, v) != "" {
-		t.Fatal("closing signups needs no approval")
+	// The same template from a local directory is not trusted: its app-auth default and
+	// public paths need a human.
+	local := cloneApp(v)
+	local.TemplateDef.Trusted = false
+	if needsApproval(ScopeAgent, nil, local) == "" {
+		t.Fatal("app-auth from an untrusted template needs approval")
 	}
 	u := &apps.App{Name: "analytics", Template: "umami"}
 	apps.ApplyTemplate(u)
@@ -321,5 +320,80 @@ func TestDeviceFlow(t *testing.T) {
 	// Device endpoints are the only unauthenticated API paths.
 	if w := call("GET", "/v1/apps"); w.Code != 401 {
 		t.Fatalf("apps without token: %d", w.Code)
+	}
+}
+
+func TestActionOutputAndMasking(t *testing.T) {
+	act := apps.Catalog["umami"].Action("dashboard_login")
+	out, err := checkOutput(act, map[string]any{"url": "https://x", "username": "admin", "password": "pw-123456", "extra": 1})
+	if err != nil || out["extra"] != nil || out["password"] != "pw-123456" {
+		t.Fatalf("output %v %v", out, err)
+	}
+	if _, err := checkOutput(act, map[string]any{"username": 5}); err == nil {
+		t.Fatal("wrong type accepted")
+	}
+	m := maskSecrets(map[string]any{"a": "token sekrit-value-1 here", "b": []any{"sekrit-value-1"}}, []string{"sekrit-value-1"})
+	if js(m) != `{"a":"token [secret] here","b":["[secret]"]}` {
+		t.Fatalf("masked %s", js(m))
+	}
+	create := apps.Catalog["umami"].Action("create_website")
+	if err := checkInput(create, map[string]string{"name": "x"}); err == nil {
+		t.Fatal("missing required input accepted")
+	}
+	if err := checkInput(create, map[string]string{"name": "x", "domain": "a.b", "bogus": "1"}); err == nil {
+		t.Fatal("unknown input accepted")
+	}
+	stats := apps.Catalog["umami"].Action("stats")
+	if err := checkInput(stats, map[string]string{"hours": "abc"}); err == nil {
+		t.Fatal("number input must be a number")
+	}
+}
+
+func TestGenerateSecretFormats(t *testing.T) {
+	h := generateSecret(apps.GenSecret{Bytes: 16, Format: "hex"})
+	a := generateSecret(apps.GenSecret{Bytes: 24, Format: "alnum"})
+	b := generateSecret(apps.GenSecret{Bytes: 32, Format: "base64"})
+	if len(h) != 32 || len(a) != 24 || len(b) != 43 || h == generateSecret(apps.GenSecret{Bytes: 16, Format: "hex"}) {
+		t.Fatalf("%q %q %q", h, a, b)
+	}
+	for _, c := range a {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			t.Fatalf("alnum has %q", c)
+		}
+	}
+}
+
+func TestBackoff(t *testing.T) {
+	if backoff(0) != 15*time.Second || backoff(2) != time.Minute || backoff(20) != 10*time.Minute {
+		t.Fatal("backoff")
+	}
+}
+
+func TestEnterPassesWallThenOpensPath(t *testing.T) {
+	s := testServer()
+	host := "vault.r1.test.slicedbread.dev"
+	uri := apps.EnterPath + "?to=" + url.QueryEscape("/#/signup")
+	w := httptest.NewRecorder()
+	r := verifyReq(host, uri)
+	r.Header.Set("Accept", "application/json") // even non-browser requests go to the login
+	s.Handler().ServeHTTP(w, r)
+	loc := w.Header().Get("Location")
+	if w.Code != 302 || !strings.HasPrefix(loc, "https://auth.r1.test.slicedbread.dev/login?rd=") || !strings.Contains(loc, url.QueryEscape("https://"+host+uri)) {
+		t.Fatalf("no session: %d %s", w.Code, loc)
+	}
+	cookie := &http.Cookie{Name: AppCookie, Value: s.auth.NewSession("me@x.dev", host, kindApp, time.Hour, time.Now())}
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, verifyReq(host, uri, cookie))
+	if w.Code != 302 || w.Header().Get("Location") != "https://"+host+"/#/signup" {
+		t.Fatalf("with session: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, verifyReq(host, apps.EnterPath+"?to="+url.QueryEscape("//evil.example"), cookie))
+	if w.Header().Get("Location") != "https://"+host+"/" {
+		t.Fatalf("open redirect: %s", w.Header().Get("Location"))
+	}
+	ex := s.exchangeURL("me@x.dev", "https://"+host+uri)
+	if !strings.Contains(ex, "rd="+url.QueryEscape(uri)) {
+		t.Fatalf("exchange must keep the enter query: %s", ex)
 	}
 }

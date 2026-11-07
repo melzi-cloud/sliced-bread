@@ -100,15 +100,21 @@ func TestRenderTemplates(t *testing.T) {
 		t.Fatal("umami needs a database")
 	}
 	dep := js(find(objs, "Deployment", "web"))
-	if !strings.Contains(dep, `"secretKeyRef":{"key":"uri","name":"db-app"}`) || !strings.Contains(dep, `"secretKeyRef":{"key":"APP_SECRET","name":"app-env"}`) {
+	if !strings.Contains(dep, `"secretKeyRef":{"key":"uri","name":"db-app"}`) || !strings.Contains(dep, `"secretKeyRef":{"key":"APP_SECRET","name":"app-env","optional":true}`) {
 		t.Fatalf("umami env must come from secrets: %s", dep)
+	}
+	if !strings.Contains(dep, "@sha256:") {
+		t.Fatal("template images are pinned by digest")
+	}
+	if find(objs, "Ingress", "web-wall") != nil {
+		t.Fatal("a wall app needs no separate wall ingress")
 	}
 
 	v := &App{Name: "vault", Template: "vaultwarden"}
 	if err := ApplyTemplate(v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Env["SIGNUPS_ALLOWED"] != "false" || v.Access != AccessAppAuth {
+	if v.Access != AccessAppAuth || !v.BackupStop || len(v.BackupRequire) != 1 {
 		t.Fatalf("vaultwarden defaults wrong: %+v", v)
 	}
 	objs, err = Render(v, testParams)
@@ -119,24 +125,155 @@ func TestRenderTemplates(t *testing.T) {
 	if !strings.Contains(ing, "app-vault-sb-strip@kubernetescrd") {
 		t.Fatal("app-auth apps still go through the cookie-stripping middleware")
 	}
-	if !strings.Contains(js(find(objs, "Deployment", "web")), `"type":"Recreate"`) {
-		t.Fatal("apps with volumes must use Recreate")
+	wall := js(find(objs, "Ingress", "web-wall"))
+	for _, want := range []string{"app-vault-sb-wall@kubernetescrd", `"/__sb/"`, `"/identity/accounts/register"`, `"/api/accounts/register"`} {
+		if !strings.Contains(wall, want) {
+			t.Errorf("vaultwarden wall ingress missing %s: %s", want, wall)
+		}
 	}
-	if err := CheckUserEnv("vaultwarden", "ADMIN_TOKEN"); err == nil {
+	d := js(find(objs, "Deployment", "web"))
+	if !strings.Contains(d, `"type":"Recreate"`) || !strings.Contains(d, `"name":"SIGNUPS_ALLOWED","value":"true"`) {
+		t.Fatal("vaultwarden: Recreate and registration on (behind the wall)")
+	}
+	if err := CheckUserEnv(v, "ADMIN_TOKEN"); err == nil {
 		t.Fatal("ADMIN_TOKEN must be refused")
 	}
-	if err := CheckUserEnv("vaultwarden", "FOO"); err != nil {
+	if err := CheckUserEnv(v, "FOO"); err != nil {
 		t.Fatal(err)
 	}
+	// The user's access choice survives a settings change.
 	again := cloneForTest(v)
-	again.Settings["signups"] = "true"
-	if err := ApplyTemplate(again); err != nil || again.Env["SIGNUPS_ALLOWED"] != "true" {
-		t.Fatalf("re-applying a template with new settings must work: %v %v", err, again.Env)
+	again.Access = AccessWall
+	again.Settings["signup_domain"] = "acme.com"
+	if err := ApplyTemplate(again); err != nil || again.Access != AccessWall {
+		t.Fatalf("access must be kept: %v %s", err, again.Access)
 	}
-	var bad *App
-	bad = &App{Name: "vault", Template: "vaultwarden", Settings: map[string]string{"signups": "maybe"}}
+	objs, _ = Render(again, testParams)
+	if !strings.Contains(js(find(objs, "Deployment", "web")), `"name":"SIGNUPS_DOMAINS_WHITELIST","value":"acme.com"`) {
+		t.Fatal("setting env missing")
+	}
+	bad := &App{Name: "vault", Template: "vaultwarden", Settings: map[string]string{"signup_domain": "not a domain"}}
 	if err := ApplyTemplate(bad); err == nil {
 		t.Fatal("invalid setting value must be refused")
+	}
+	if err := ApplyTemplate(&App{Name: "vault", Template: "vaultwarden", Settings: map[string]string{"signups": "true"}}); err == nil {
+		t.Fatal("the old signups setting no longer exists")
+	}
+}
+
+const multiTemplate = `apiVersion: bakery.slicedbread.dev/v1
+name: tube
+version: 0.1.0
+description: test
+upstream: {project: T, url: https://example.com, licence: MIT}
+access: {mode: wall}
+components:
+  - name: web
+    image: example.com/web:1@sha256:0000000000000000000000000000000000000000000000000000000000000001
+    port: 3000
+    files: [{path: /config/config.yml, template: files/config.yml}]
+    env: {COMPANION: "${component.companion.internal}"}
+  - name: companion
+    image: example.com/comp:1@sha256:0000000000000000000000000000000000000000000000000000000000000002
+    port: 8282
+    replicas: 2
+    env: {KEY: "${secret.COMPANION_KEY}"}
+  - name: worker
+    image: example.com/worker:1@sha256:0000000000000000000000000000000000000000000000000000000000000003
+routes:
+  - {path: /companion, to: companion}
+database: {postgres: {version: "17"}}
+secrets:
+  generate: [{name: COMPANION_KEY, bytes: 16, format: alnum}]
+`
+
+func TestMultiComponentTemplate(t *testing.T) {
+	tm, err := ParseTemplate([]byte(multiTemplate), map[string]string{
+		"files/config.yml": "companion: ${component.companion.internal}/companion\nkey: ${secret.COMPANION_KEY}\ndb: ${db.url}\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Name: "tube", TemplateDef: tm}
+	if err := ApplyTemplate(a); err != nil {
+		t.Fatal(err)
+	}
+	// Without secret values the config file cannot be rendered yet: web waits.
+	objs, err := Render(a, testParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if find(objs, "Deployment", "web") != nil || find(objs, "Deployment", "companion") == nil {
+		t.Fatal("web waits for its config file values; companion does not")
+	}
+	p := testParams
+	p.Values = map[string]string{"COMPANION_KEY": "k123"}
+	p.DB = map[string]string{"url": "postgresql://app:pw@db-rw/app"}
+	objs, err = Render(a, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := js(find(objs, "Secret", "files-web"))
+	if !strings.Contains(files, "companion: http://companion.app-tube.svc.cluster.local:8282/companion") || !strings.Contains(files, "key: k123") {
+		t.Fatalf("config file: %s", files)
+	}
+	web := js(find(objs, "Deployment", "web"))
+	if !strings.Contains(web, `"subPath":"f0"`) || !strings.Contains(web, `"value":"http://companion.app-tube.svc.cluster.local:8282"`) {
+		t.Fatalf("web: %s", web)
+	}
+	comp := js(find(objs, "Deployment", "companion"))
+	if !strings.Contains(comp, `"replicas":2`) || !strings.Contains(comp, `"slicedbread.dev/component":"companion"`) {
+		t.Fatalf("companion: %s", comp)
+	}
+	worker := js(find(objs, "Deployment", "worker"))
+	if strings.Contains(worker, "readinessProbe") || find(objs, "Service", "worker") != nil {
+		t.Fatal("workers have no port, probe or service")
+	}
+	ing := js(find(objs, "Ingress", "web"))
+	if !strings.Contains(ing, `{"backend":{"service":{"name":"companion","port":{"name":"http"}}},"path":"/companion"`) {
+		t.Fatalf("route to companion missing: %s", ing)
+	}
+	svc := js(find(objs, "Service", "web"))
+	if !strings.Contains(svc, `"port":80`) || !strings.Contains(svc, `"port":3000`) {
+		t.Fatalf("first component answers on its port and 80: %s", svc)
+	}
+}
+
+func TestTemplateValidation(t *testing.T) {
+	cases := map[string]string{
+		"tag only":       strings.Replace(multiTemplate, "@sha256:0000000000000000000000000000000000000000000000000000000000000001", "", 1),
+		"bad route":      strings.Replace(multiTemplate, "to: companion}", "to: nothing}", 1),
+		"undeclared ref": strings.Replace(multiTemplate, "${secret.COMPANION_KEY}", "${secret.OTHER}", 1),
+		"partial secret": strings.Replace(multiTemplate, `KEY: "${secret.COMPANION_KEY}"`, `KEY: "x${secret.COMPANION_KEY}"`, 1),
+		"unknown field":  multiTemplate + "colour: blue\n",
+		"worker first":   strings.Replace(multiTemplate, "    port: 3000\n", "", 1),
+	}
+	for name, src := range cases {
+		if _, err := ParseTemplate([]byte(src), map[string]string{"files/config.yml": "x"}); err == nil {
+			t.Errorf("%s: should fail", name)
+		}
+	}
+	if _, err := ParseTemplate([]byte(multiTemplate), nil); err == nil {
+		t.Error("missing file template should fail")
+	}
+}
+
+func TestBuiltInCatalog(t *testing.T) {
+	for _, name := range []string{"umami", "vaultwarden"} {
+		tm := Catalog[name]
+		if tm == nil || !tm.Trusted {
+			t.Fatalf("%s missing or untrusted", name)
+		}
+	}
+	u := Catalog["umami"]
+	if a := u.Action("dashboard_login"); a == nil || !a.HasSecretOutput() {
+		t.Fatal("dashboard_login returns a secret")
+	}
+	if a := u.Action("set_admin_password"); a == nil || a.On != "install" {
+		t.Fatal("umami sets its admin password on install")
+	}
+	if !strings.HasPrefix(u.Files["actions/create-website.mjs"], "#!") {
+		t.Fatal("scripts are loaded with the template")
 	}
 }
 
@@ -173,28 +310,6 @@ func cloneForTest(a *App) *App {
 	var c App
 	json.Unmarshal(b, &c)
 	return &c
-}
-
-func TestVaultwardenSignupDomain(t *testing.T) {
-	v := &App{Name: "vault", Template: "vaultwarden", Settings: map[string]string{"signups": "true", "signup_domain": "acme.com"}}
-	if err := ApplyTemplate(v); err != nil {
-		t.Fatal(err)
-	}
-	if v.Env["SIGNUPS_DOMAINS_WHITELIST"] != "acme.com" || v.Env["SIGNUPS_ALLOWED"] != "true" {
-		t.Fatalf("env: %v", v.Env)
-	}
-	v.Settings["signup_domain"] = ""
-	ApplyTemplate(v)
-	if _, ok := v.Env["SIGNUPS_DOMAINS_WHITELIST"]; ok {
-		t.Fatal("clearing the domain must remove the restriction")
-	}
-	bad := &App{Name: "vault", Template: "vaultwarden", Settings: map[string]string{"signup_domain": "not a domain"}}
-	if err := ApplyTemplate(bad); err == nil {
-		t.Fatal("invalid domain accepted")
-	}
-	if err := CheckUserEnv("vaultwarden", "SIGNUPS_DOMAINS_WHITELIST"); err == nil {
-		t.Fatal("template-managed env must be refused")
-	}
 }
 
 func TestInternalRefsAndAllowPolicy(t *testing.T) {

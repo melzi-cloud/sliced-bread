@@ -103,9 +103,9 @@ func (s *Server) reconcile(ctx context.Context, a *apps.App) error {
 		return err
 	}
 	changed := false
-	for _, k := range a.Generated {
-		if vals[k] == "" {
-			vals[k] = randString(24)
+	for _, g := range a.Generate {
+		if vals[g.Name] == "" {
+			vals[g.Name] = generateSecret(g)
 			changed = true
 		}
 	}
@@ -114,7 +114,9 @@ func (s *Server) reconcile(ctx context.Context, a *apps.App) error {
 			return err
 		}
 	}
-	objs, err = apps.Render(a, s.params(a, secretVersion(vals)))
+	p := s.params(a, secretVersion(vals))
+	p.Values, p.DB = vals, s.dbValues(ctx, a)
+	objs, err = apps.Render(a, p)
 	if err != nil {
 		return err
 	}
@@ -126,6 +128,9 @@ func (s *Server) reconcile(ctx context.Context, a *apps.App) error {
 	// Prune objects that are no longer rendered.
 	if !(a.Access == apps.AccessWall && len(a.PublicPaths) > 0) {
 		s.kube.Delete(ctx, "networking.k8s.io/v1", "Ingress", ns, "web-public")
+	}
+	if a.Access == apps.AccessWall {
+		s.kube.Delete(ctx, "networking.k8s.io/v1", "Ingress", ns, "web-wall")
 	}
 	if !a.Database {
 		s.kube.Delete(ctx, "postgresql.cnpg.io/v1", "Cluster", ns, "db")
@@ -447,7 +452,11 @@ type AppStatus struct {
 	ServingBuild string            `json:"servingBuild,omitempty"` // build id currently deployed (source apps)
 	SecretKeys   []string          `json:"secretKeys,omitempty"`
 	Settings     map[string]string `json:"settings,omitempty"`
-	Actions      []apps.Action     `json:"actions,omitempty"`
+	Actions      []actionView      `json:"actions,omitempty"`
+	Setup        []SetupStatus     `json:"setup,omitempty"`
+	Components   []string          `json:"components,omitempty"`
+	Secrets      []string          `json:"secrets,omitempty"` // names only; values never leave the cluster
+	WallPaths    []string          `json:"wallPaths,omitempty"`
 	Database     string            `json:"database,omitempty"`
 	Notes        string            `json:"notes,omitempty"`
 	Backups      string            `json:"backups,omitempty"`
@@ -498,8 +507,21 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 	default:
 		st.Source = "image " + a.Image
 	}
-	if t := apps.Catalog[a.Template]; t != nil {
-		st.Actions, st.Notes = t.Actions, t.Notes
+	if t := a.TemplateDef; t != nil {
+		st.Actions, st.Notes, st.Setup, st.WallPaths = actionViews(t), t.Notes, s.setupStatus(a), a.WallPaths
+		st.Source = "template " + t.Name + " " + t.Version
+		if !t.Trusted {
+			st.Source += " (from a local directory)"
+		}
+	}
+	for _, c := range apps.Components(a) {
+		st.Components = append(st.Components, c.Name)
+	}
+	for _, g := range a.Generate {
+		st.Secrets = append(st.Secrets, g.Name+" (generated)")
+	}
+	for _, p := range a.Provide {
+		st.Secrets = append(st.Secrets, p.Name+" (entered in the dashboard)")
 	}
 	ns := apps.Namespace(a.Name)
 	if a.Database {
@@ -523,12 +545,31 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 		st.State, st.Message = "paused", "stopped while a backup or restore copies its data; it starts again by itself (see: sb backups "+a.Name+")"
 		return st
 	}
+	comps := apps.Components(a)
 	var dep kube.Obj
-	if err := s.kube.Get(ctx, "apps/v1", "Deployment", ns, "web", &dep); err != nil {
+	if err := s.kube.Get(ctx, "apps/v1", "Deployment", ns, comps[0].Name, &dep); err != nil {
 		st.State, st.Message = "pending", "deployment not created yet"
+		if a.Database && a.TemplateDef != nil {
+			st.Message = "waiting for the database"
+		}
 		return st
 	}
 	st.Serving = servingImage(dep)
+	// The other components must be settled too.
+	othersSettled, otherProblem := true, ""
+	for _, c := range comps[1:] {
+		var d kube.Obj
+		if err := s.kube.Get(ctx, "apps/v1", "Deployment", ns, c.Name, &d); err != nil {
+			othersSettled, otherProblem = false, "component "+c.Name+" not created yet"
+			continue
+		}
+		want := kube.Num(d, "spec", "replicas")
+		if !(kube.Num(d, "status", "observedGeneration") >= kube.Num(d, "metadata", "generation") &&
+			kube.Num(d, "status", "updatedReplicas") == want && kube.Num(d, "status", "readyReplicas") == want &&
+			kube.Num(d, "status", "replicas") == want) {
+			othersSettled, otherProblem = false, "component "+c.Name+" starting"
+		}
+	}
 	if a.Upload != nil && a.Build != nil && a.Build.LastGood != "" {
 		st.ServingBuild = buildIDFromImage(st.Serving)
 	}
@@ -538,7 +579,7 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 		kube.Num(dep, "status", "readyReplicas") == want &&
 		kube.Num(dep, "status", "unavailableReplicas") == 0 &&
 		kube.Num(dep, "status", "replicas") == want &&
-		(a.CurrentImage() == "" || st.Serving == a.CurrentImage())
+		(a.CurrentImage() == "" || st.Serving == a.CurrentImage()) && othersSettled
 	if settled {
 		// Pods of the previous version may still be shutting down and serving open connections.
 		if n := s.terminatingPods(ctx, ns, a.Name); n > 0 {
@@ -557,13 +598,20 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 	case !settled:
 		st.State = "starting"
 		st.Message = s.podProblem(ctx, ns)
+		if st.Message == "" {
+			st.Message = otherProblem
+		}
 		if st.Message == "" && a.Database && st.Database != "Cluster in healthy state" {
 			st.Message = "waiting for database: " + st.Database
 		}
 	case a.Build != nil && a.Build.Phase == "failed" && a.Build.LastGood != "":
 		st.State, st.Message = "update-failed", "latest build "+a.Build.ID+" failed; the previous version is still serving. See: sb logs "+a.Name+" --build"
-	case a.Template == "umami" && a.Hooks["admin-password"] != "set":
-		st.State, st.Message = "configuring", "finishing template setup (replacing the default admin password)"
+	case pendingInstall(a) != nil:
+		act := pendingInstall(a)
+		st.State, st.Message = "configuring", "running install action "+act.Name+" ("+act.Description+")"
+		if r := getRun(a, installKey(act.Name)); r.Phase == "failed" {
+			st.Message = fmt.Sprintf("install action %s failed (attempt %d, retrying): %s; see: sb logs %s --action %s", act.Name, r.Attempt, r.Msg, a.Name, act.Name)
+		}
 	default:
 		st.State = "running"
 	}
@@ -646,4 +694,30 @@ func (s *Server) appPod(ctx context.Context, a *apps.App) (string, error) {
 		return kube.Str(pods[i], "metadata", "creationTimestamp") > kube.Str(pods[j], "metadata", "creationTimestamp")
 	})
 	return kube.Str(pods[0], "metadata", "name"), nil
+}
+
+// componentPod returns the newest pod of a component (default: the first).
+func (s *Server) componentPod(ctx context.Context, a *apps.App, comp string) (string, error) {
+	if comp == "" {
+		comp = apps.Primary(a).Name
+	}
+	pods, err := s.kube.List(ctx, "v1", "Pod", apps.Namespace(a.Name), apps.AppLabel+"="+a.Name+","+apps.ComponentLabel+"="+comp)
+	if err != nil {
+		return "", err
+	}
+	if len(pods) == 0 {
+		return "", fmt.Errorf("no pods for %s component %s (components: %v)", a.Name, comp, componentNames(a))
+	}
+	sort.Slice(pods, func(i, j int) bool {
+		return kube.Str(pods[i], "metadata", "creationTimestamp") > kube.Str(pods[j], "metadata", "creationTimestamp")
+	})
+	return kube.Str(pods[0], "metadata", "name"), nil
+}
+
+func componentNames(a *apps.App) []string {
+	var out []string
+	for _, c := range apps.Components(a) {
+		out = append(out, c.Name)
+	}
+	return out
 }

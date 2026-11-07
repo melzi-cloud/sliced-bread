@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"fmt"
+	"github.com/melzi-cloud/sliced-bread/internal/apps"
 	"io"
 	"net/http"
 	"regexp"
@@ -42,7 +43,7 @@ func (s *Server) apiCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, internalURL(a)+path, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, internalURL(a, path)+path, nil)
 	req.Host = s.hosts().App(a.Name)
 	req.Header.Set("Accept", "text/html,*/*")
 	req.Header.Set("X-Sb-User", "sb-check")
@@ -78,4 +79,16 @@ func (s *Server) apiCheck(w http.ResponseWriter, r *http.Request) {
 		res.Note += fmt.Sprintf("; redirect to %s", resp.Header.Get("Location"))
 	}
 	writeJSON(w, 200, res)
+}
+
+// internalURL is the in-cluster address of the component serving path.
+func internalURL(a *apps.App, path string) string {
+	comp := apps.RouteFor(apps.Routes(a), path)
+	port := 80
+	for i, c := range apps.Components(a) {
+		if c.Name == comp && i > 0 {
+			port = c.Port
+		}
+	}
+	return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", apps.ServiceName(a, comp), apps.Namespace(a.Name), port)
 }

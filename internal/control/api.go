@@ -111,9 +111,9 @@ func (s *Server) apiWhoami(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiCatalog(w http.ResponseWriter, r *http.Request) {
-	var out []*apps.Template
+	var out []catalogEntry
 	for _, n := range apps.TemplateNames() {
-		out = append(out, apps.Catalog[n])
+		out = append(out, catalogView(apps.Catalog[n]))
 	}
 	writeJSON(w, 200, map[string]any{"templates": out})
 }
@@ -152,19 +152,25 @@ func (s *Server) apiGetApp(w http.ResponseWriter, r *http.Request) {
 
 // DeployRequest creates an app.
 type DeployRequest struct {
-	Name        string            `json:"name"`
-	Template    string            `json:"template,omitempty"`
-	Image       string            `json:"image,omitempty"`
-	Repo        *apps.Repo        `json:"repo,omitempty"`
-	Upload      string            `json:"upload,omitempty"` // id returned by POST /v1/uploads
-	Port        int               `json:"port,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	Secrets     map[string]string `json:"secrets,omitempty"`
-	Access      string            `json:"access,omitempty"`
-	PublicPaths []string          `json:"publicPaths,omitempty"`
-	Settings    map[string]string `json:"settings,omitempty"`
-	Database    bool              `json:"database,omitempty"`
-	HealthPath  string            `json:"healthPath,omitempty"`
+	Name     string            `json:"name"`
+	Template string            `json:"template,omitempty"`
+	Image    string            `json:"image,omitempty"`
+	Repo     *apps.Repo        `json:"repo,omitempty"`
+	Upload   string            `json:"upload,omitempty"` // id returned by POST /v1/uploads
+	Port     int               `json:"port,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+	// TemplateFiles deploys a template from a local directory (sb deploy --template-dir):
+	// template.yaml plus its other files by relative path.
+	TemplateFiles map[string]string `json:"templateFiles,omitempty"`
+	// Generate names env keys whose values sb-control generates; Request names env keys a
+	// human enters in the dashboard. Secret values never travel through the API (D-030).
+	Generate    []string             `json:"generate,omitempty"`
+	Request     []apps.ProvideSecret `json:"request,omitempty"`
+	Access      string               `json:"access,omitempty"`
+	PublicPaths []string             `json:"publicPaths,omitempty"`
+	Settings    map[string]string    `json:"settings,omitempty"`
+	Database    bool                 `json:"database,omitempty"`
+	HealthPath  string               `json:"healthPath,omitempty"`
 }
 
 // needsApproval reports why an agent cannot apply this app state directly, or "".
@@ -177,20 +183,27 @@ func needsApproval(scope string, prev, next *apps.App) string {
 	if prev != nil {
 		prevAccess = prev.Access
 	}
+	// Only built-in (trusted) templates may open access or add public paths without a
+	// human: a template from a local directory is treated like any agent change.
 	templateAccess := ""
-	if t := apps.Catalog[next.Template]; t != nil {
-		templateAccess = t.Access
+	var templatePublic []string
+	if t := apps.TemplateOf(next); t != nil && t.Trusted {
+		templateAccess = t.Access.Mode
+		templatePublic = t.Access.PublicPaths
 	}
 	if next.Access != prevAccess && next.Access != apps.AccessWall && next.Access != templateAccess {
 		reasons = append(reasons, fmt.Sprintf("access %s -> %s", prevAccess, next.Access))
 	}
-	if prev != nil && len(next.PublicPaths) > len(prev.PublicPaths) && next.Template == "" {
-		reasons = append(reasons, fmt.Sprintf("public paths %v", next.PublicPaths))
+	var had []string
+	if prev != nil {
+		had = prev.PublicPaths
 	}
-	if prev == nil && len(next.PublicPaths) > 0 && next.Template == "" {
-		reasons = append(reasons, fmt.Sprintf("public paths %v", next.PublicPaths))
+	for _, p := range next.PublicPaths {
+		if !containsStr(had, p) && !containsStr(templatePublic, p) {
+			reasons = append(reasons, fmt.Sprintf("public path %s", p))
+		}
 	}
-	if t := apps.Catalog[next.Template]; t != nil {
+	if t := apps.TemplateOf(next); t != nil {
 		for _, set := range t.Settings {
 			v := next.Settings[set.Name]
 			old := ""
@@ -228,7 +241,22 @@ func (s *Server) apiCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	a := &apps.App{
 		Name: req.Name, Template: req.Template, Image: req.Image, Repo: req.Repo, Port: req.Port,
-		Env: req.Env, Settings: req.Settings, PublicPaths: req.PublicPaths, Access: apps.AccessWall,
+		Env: req.Env, Settings: req.Settings, PublicPaths: req.PublicPaths,
+	}
+	if len(req.TemplateFiles) > 0 {
+		raw := req.TemplateFiles["template.yaml"]
+		files := map[string]string{}
+		for k, v := range req.TemplateFiles {
+			if k != "template.yaml" {
+				files[k] = v
+			}
+		}
+		t, err := apps.ParseTemplate([]byte(raw), files)
+		if err != nil {
+			fail(w, 400, err.Error(), "fix the template; the format is in the skill file and docs/template-format.md")
+			return
+		}
+		a.TemplateDef, a.Template = t, t.Name
 	}
 	if req.Upload != "" {
 		up, ok := s.uploadInfo(req.Upload)
@@ -238,16 +266,12 @@ func (s *Server) apiCreateApp(w http.ResponseWriter, r *http.Request) {
 		}
 		a.Upload = up
 	}
-	envKeys := []string{}
+	envKeys := append([]string{}, req.Generate...)
 	for k := range req.Env {
 		envKeys = append(envKeys, k)
 	}
-	for k := range req.Secrets {
-		envKeys = append(envKeys, k)
-	}
-	if err := apps.CheckUserEnv(a.Template, envKeys...); err != nil {
-		fail(w, 400, err.Error(), "")
-		return
+	for _, p := range req.Request {
+		envKeys = append(envKeys, p.Name)
 	}
 	if a.Template != "" {
 		if a.Image != "" || a.Repo != nil || a.Upload != nil {
@@ -259,8 +283,15 @@ func (s *Server) apiCreateApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err := apps.CheckUserEnv(a, envKeys...); err != nil {
+		fail(w, 400, err.Error(), "")
+		return
+	}
 	if req.Access != "" {
 		a.Access = req.Access
+	}
+	if a.Access == "" {
+		a.Access = apps.AccessWall
 	}
 	if req.Database {
 		a.Database = true
@@ -274,12 +305,9 @@ func (s *Server) apiCreateApp(w http.ResponseWriter, r *http.Request) {
 	if req.HealthPath != "" {
 		a.HealthPath = req.HealthPath
 	}
-	for k := range req.Secrets {
-		if _, plain := a.Env[k]; plain {
-			fail(w, 400, "key "+k+" is set both as env and secret", "")
-			return
-		}
-		a.AddSecretKey(k)
+	if err := addSecretKeys(a, req.Generate, req.Request); err != nil {
+		fail(w, 400, err.Error(), "")
+		return
 	}
 	if err := a.Validate(); err != nil {
 		fail(w, 400, err.Error(), "")
@@ -293,10 +321,6 @@ func (s *Server) apiCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if why := needsApproval(scopeOf(r), nil, a); why != "" {
-		if len(req.Secrets) > 0 {
-			fail(w, 400, "this deploy needs human approval, so secrets cannot be included", "deploy without secrets, then set them with: sb env set --secret after approval")
-			return
-		}
 		ap, err := s.requestApproval(ctx, "create", a.Name, "create app "+a.Name+": "+why, a, scopeOf(r))
 		if err != nil {
 			fail(w, 500, err.Error(), "")
@@ -312,16 +336,6 @@ func (s *Server) apiCreateApp(w http.ResponseWriter, r *http.Request) {
 	if err := s.reconcile(ctx, a); err != nil {
 		fail(w, 500, "saved but failed to apply: "+err.Error(), "")
 		return
-	}
-	if len(req.Secrets) > 0 {
-		if err := s.setSecrets(ctx, a, req.Secrets, nil); err != nil {
-			fail(w, 500, err.Error(), "")
-			return
-		}
-		cur, _ := s.getApp(ctx, a.Name)
-		if cur != nil {
-			s.reconcile(ctx, cur)
-		}
 	}
 	st := s.status(ctx, a)
 	writeJSON(w, 201, map[string]any{"app": st, "hint": "Wait until it is running with: sb wait " + a.Name})
@@ -352,9 +366,48 @@ func (s *Server) apiDeleteApp(w http.ResponseWriter, r *http.Request) {
 
 // EnvRequest changes env vars and secrets.
 type EnvRequest struct {
-	Set     map[string]string `json:"set,omitempty"`
-	Secrets map[string]string `json:"secrets,omitempty"`
-	Unset   []string          `json:"unset,omitempty"`
+	Set      map[string]string    `json:"set,omitempty"`
+	Unset    []string             `json:"unset,omitempty"`
+	Generate []string             `json:"generate,omitempty"` // sb-control creates the value
+	Request  []apps.ProvideSecret `json:"request,omitempty"`  // a human enters the value in the dashboard
+}
+
+// addSecretKeys records generated and requested secret env keys on an app.
+func addSecretKeys(a *apps.App, generate []string, request []apps.ProvideSecret) error {
+	for _, k := range generate {
+		if _, plain := a.Env[k]; plain {
+			return fmt.Errorf("key %s is set as plain env; unset it first", k)
+		}
+		if !hasGen(a, k) {
+			a.Generate = append(a.Generate, apps.GenSecret{Name: k, Bytes: 32, Format: "hex"})
+		}
+		a.AddSecretKey(k)
+	}
+	for _, p := range request {
+		if _, plain := a.Env[p.Name]; plain {
+			return fmt.Errorf("key %s is set as plain env; unset it first", p.Name)
+		}
+		found := false
+		for i := range a.Provide {
+			if a.Provide[i].Name == p.Name {
+				a.Provide[i], found = p, true
+			}
+		}
+		if !found {
+			a.Provide = append(a.Provide, p)
+		}
+		a.AddSecretKey(p.Name)
+	}
+	return nil
+}
+
+func hasGen(a *apps.App, k string) bool {
+	for _, g := range a.Generate {
+		if g.Name == k {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) apiEnv(w http.ResponseWriter, r *http.Request) {
@@ -369,15 +422,14 @@ func (s *Server) apiEnv(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
-	var keys []string
+	keys := append(append([]string{}, req.Unset...), req.Generate...)
 	for k := range req.Set {
 		keys = append(keys, k)
 	}
-	for k := range req.Secrets {
-		keys = append(keys, k)
+	for _, p := range req.Request {
+		keys = append(keys, p.Name)
 	}
-	keys = append(keys, req.Unset...)
-	if err := apps.CheckUserEnv(a.Template, keys...); err != nil {
+	if err := apps.CheckUserEnv(a, keys...); err != nil {
 		fail(w, 400, err.Error(), "use: sb settings")
 		return
 	}
@@ -388,13 +440,27 @@ func (s *Server) apiEnv(w http.ResponseWriter, r *http.Request) {
 		a.Env[k] = v
 		a.RemoveSecretKey(k)
 	}
-	for k := range req.Secrets {
-		delete(a.Env, k)
-		a.AddSecretKey(k)
-	}
 	for _, k := range req.Unset {
 		delete(a.Env, k)
 		a.RemoveSecretKey(k)
+		var gen []apps.GenSecret
+		for _, g := range a.Generate {
+			if g.Name != k || (a.TemplateDef != nil && a.TemplateDef.Secrets.Generate != nil && templateGenerates(a, k)) {
+				gen = append(gen, g)
+			}
+		}
+		a.Generate = gen
+		var prov []apps.ProvideSecret
+		for _, p := range a.Provide {
+			if p.Name != k {
+				prov = append(prov, p)
+			}
+		}
+		a.Provide = prov
+	}
+	if err := addSecretKeys(a, req.Generate, req.Request); err != nil {
+		fail(w, 400, err.Error(), "")
+		return
 	}
 	if err := a.Validate(); err != nil {
 		fail(w, 400, err.Error(), "")
@@ -405,7 +471,7 @@ func (s *Server) apiEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	if err := s.setSecrets(ctx, a, req.Secrets, req.Unset); err != nil {
+	if err := s.setSecrets(ctx, a, nil, req.Unset); err != nil {
 		fail(w, 500, err.Error(), "")
 		return
 	}
@@ -573,12 +639,31 @@ func (s *Server) apiLogs(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, s.buildLogs(ctx, a, tail))
 		return
 	}
-	pod, err := s.appPod(ctx, a)
+	ns := apps.Namespace(a.Name)
+	if act := r.URL.Query().Get("action"); act != "" {
+		pods, _ := s.kube.List(ctx, "v1", "Pod", ns, apps.ActionLabel+"="+dashed(act))
+		if len(pods) == 0 {
+			io.WriteString(w, "no recent run of action "+act+" (runs are kept for 15 minutes)\n")
+			return
+		}
+		sort.Slice(pods, func(i, j int) bool {
+			return kube.Str(pods[i], "metadata", "creationTimestamp") > kube.Str(pods[j], "metadata", "creationTimestamp")
+		})
+		l, err := s.kube.Logs(ctx, ns, kube.Str(pods[0], "metadata", "name"), "action", tail)
+		if err != nil {
+			io.WriteString(w, "logs unavailable: "+err.Error()+"\n")
+			return
+		}
+		// Action output can contain secret values (scripts receive them); mask them.
+		io.WriteString(w, maskSecrets(l, s.secretValuesForMask(ctx, a)).(string))
+		return
+	}
+	pod, err := s.componentPod(ctx, a, r.URL.Query().Get("component"))
 	if err != nil {
 		io.WriteString(w, "no running pod yet: "+err.Error()+"\n")
 		return
 	}
-	l, err := s.kube.Logs(ctx, apps.Namespace(a.Name), pod, "app", tail)
+	l, err := s.kube.Logs(ctx, ns, pod, "app", tail)
 	if err != nil {
 		io.WriteString(w, "logs unavailable: "+err.Error()+"\n")
 		return
@@ -600,27 +685,62 @@ func (s *Server) apiAction(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
-	t := apps.Catalog[a.Template]
 	var act *apps.Action
-	if t != nil {
-		act = t.Action(r.PathValue("action"))
+	if a.TemplateDef != nil {
+		act = a.TemplateDef.Action(r.PathValue("action"))
 	}
 	if act == nil {
 		fail(w, 404, fmt.Sprintf("app %s has no action %q", a.Name, r.PathValue("action")), "list actions with: sb status "+a.Name)
 		return
 	}
-	if act.AdminOnly && scopeOf(r) != ScopeAdmin {
-		fail(w, 403, "action "+act.Name+" shows credentials, so a human runs it in the dashboard", "https://"+s.hosts().Auth()+"/apps/"+a.Name)
+	if err := checkInput(act, req.Input); err != nil {
+		fail(w, 400, err.Error(), "")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	appPage := "https://" + s.hosts().Auth() + "/apps/" + a.Name
+	if act.Approval && scopeOf(r) != ScopeAdmin {
+		ap, err := s.requestApproval(r.Context(), "action", a.Name, "run action "+act.Name+" on "+a.Name+inputSummary(req.Input), nil, scopeOf(r))
+		if err != nil {
+			fail(w, 500, err.Error(), "")
+			return
+		}
+		ap.Action, ap.Input = act.Name, req.Input
+		s.saveApproval(r.Context(), ap)
+		s.approvalResponse(w, ap)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), act.TimeoutDuration()+actionStartSlack+10*time.Second)
 	defer cancel()
-	out, err := s.runAction(ctx, a, act.Name, req.Input)
+	res, err := s.runAction(ctx, a, act.Name, req.Input)
 	if err != nil {
 		fail(w, 400, err.Error(), "")
 		return
 	}
+	out := res.Result
+	if len(res.Secret) > 0 {
+		// Secret outputs never reach API clients, admin tokens included (D-030).
+		var names []string
+		for k := range res.Secret {
+			names = append(names, k)
+			out[k] = "[secret: shown only in the dashboard]"
+		}
+		sort.Strings(names)
+		out["dashboard"] = appPage
+		out["note"] = "This action returns " + strings.Join(names, ", ") + ", which only a signed-in human sees: give the user the dashboard link (run " + act.Name + " there)."
+	}
 	writeJSON(w, 200, out)
+}
+
+func inputSummary(in map[string]string) string {
+	if len(in) == 0 {
+		return ""
+	}
+	var parts []string
+	for k, v := range in {
+		parts = append(parts, k+"="+v)
+	}
+	sort.Strings(parts)
+	return " (" + strings.Join(parts, ", ") + ")"
 }
 
 func (s *Server) apiListApprovals(w http.ResponseWriter, r *http.Request) {
@@ -692,4 +812,84 @@ func (s *Server) apiGetApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"id": ap.ID, "app": ap.App, "state": ap.State, "result": ap.Result, "summary": ap.Summary})
+}
+
+func containsStr(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func templateGenerates(a *apps.App, k string) bool {
+	for _, g := range a.TemplateDef.Secrets.Generate {
+		if g.Name == k {
+			return true
+		}
+	}
+	return false
+}
+
+// catalogEntry is what agents see of a template: what it is and how to operate it.
+type catalogEntry struct {
+	Name        string            `json:"name"`
+	Version     string            `json:"version"`
+	Description string            `json:"description"`
+	Access      string            `json:"access"`
+	Components  []string          `json:"components"`
+	Database    bool              `json:"database,omitempty"`
+	Settings    []settingView     `json:"settings,omitempty"`
+	Actions     []actionView      `json:"actions,omitempty"`
+	Setup       []apps.SetupStep  `json:"setup,omitempty"`
+	Secrets     []string          `json:"secrets,omitempty"`
+	Notes       string            `json:"notes,omitempty"`
+	Upstream    apps.Upstream     `json:"upstream"`
+	Extra       map[string]string `json:"-"`
+}
+
+type settingView struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Type        string   `json:"type"`
+	Values      []string `json:"values,omitempty"`
+	Default     string   `json:"default"`
+	ApprovalFor []string `json:"approvalFor,omitempty"`
+}
+
+type actionView struct {
+	Name        string                `json:"name"`
+	Description string                `json:"description"`
+	Input       map[string]apps.Field `json:"input,omitempty"`
+	Output      map[string]apps.Field `json:"output,omitempty"`
+	On          string                `json:"on,omitempty"`
+	Approval    bool                  `json:"approval,omitempty"`
+	HumanOnly   bool                  `json:"humanOnly,omitempty"` // has secret outputs: run it in the dashboard
+}
+
+func actionViews(t *apps.Template) []actionView {
+	var out []actionView
+	for _, a := range t.Actions {
+		out = append(out, actionView{Name: a.Name, Description: a.Description, Input: a.Input, Output: a.Output, On: a.On, Approval: a.Approval, HumanOnly: a.HasSecretOutput()})
+	}
+	return out
+}
+
+func catalogView(t *apps.Template) catalogEntry {
+	e := catalogEntry{Name: t.Name, Version: t.Version, Description: t.Description, Access: t.Access.Mode,
+		Database: t.Database != nil, Setup: t.Setup, Notes: t.Notes, Upstream: t.Upstream, Actions: actionViews(t)}
+	for _, c := range t.Components {
+		e.Components = append(e.Components, c.Name)
+	}
+	for _, s := range t.Settings {
+		e.Settings = append(e.Settings, settingView{s.Name, s.Description, s.Type, s.Values, string(s.Default), s.ApprovalFor})
+	}
+	for _, g := range t.Secrets.Generate {
+		e.Secrets = append(e.Secrets, g.Name+" (generated)")
+	}
+	for _, p := range t.Secrets.Provide {
+		e.Secrets = append(e.Secrets, p.Name+" (entered by a human in the dashboard)")
+	}
+	return e
 }

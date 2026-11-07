@@ -114,9 +114,13 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 <p><a href="{{.Status.URL}}">{{.Status.URL}}</a> &middot; {{.Status.State}} &middot; {{.Status.Access}}</p>
 {{if .Status.Message}}<p class="muted">{{.Status.Message}}</p>{{end}}
 {{if .Status.Backups}}<p>Backups: {{.Status.Backups}}</p>{{end}}
+{{if .Status.Setup}}<h3>Setup</h3><ul>{{range .Status.Setup}}<li>{{if .Done}}<span class="ok">done</span>{{else}}<b>to do</b>{{end}}: {{.Description}}{{if and .Link (not .Done)}} <a href="{{.Link}}">open</a>{{end}}</li>{{end}}</ul>{{end}}
+{{if .Provide}}<h3>Secrets to enter</h3><p class="muted">Values are stored in the cluster and given to the app. Nobody, agents included, can read them back here or through the API.</p>
+<table>{{range .Provide}}<tr><td><b>{{.Name}}</b>{{if .Required}} (required){{end}}<br><span class="muted">{{.Description}}</span></td><td>{{if .Set}}<span class="ok">set</span>{{end}}
+<form method="post" action="/apps/{{$.App.Status.Name}}/secrets/{{.Name}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input name="value" type="password" autocomplete="off" placeholder="{{if .Set}}replace value{{else}}value{{end}}"><button type="submit">Save</button></form></td></tr>{{end}}</table>{{end}}
 {{if .Result}}<h3>{{.Result.Action}}</h3><table>{{range .Result.Rows}}<tr><td>{{index . 0}}</td><td><code>{{index . 1}}</code></td></tr>{{end}}</table>{{end}}
-{{if .Actions}}<h3>Actions</h3><table>{{range .Actions}}<tr><td><b>{{.Name}}</b>{{if .AdminOnly}} <span class="muted">(admins)</span>{{end}}<br><span class="muted">{{.Description}}</span></td><td>
-<form method="post" action="/apps/{{$.App.Status.Name}}/actions/{{.Name}}"><input type="hidden" name="csrf" value="{{$.CSRF}}">{{range $k, $v := .Input}}<input name="{{$k}}" placeholder="{{$k}}: {{$v}}">{{end}}<button type="submit">Run</button></form></td></tr>{{end}}</table>{{end}}
+{{if .Actions}}<h3>Actions</h3><table>{{range .Actions}}<tr><td><b>{{.Name}}</b>{{if .HumanOnly}} <span class="muted">(shows credentials)</span>{{end}}{{if .On}} <span class="muted">(runs on {{.On}})</span>{{end}}<br><span class="muted">{{.Description}}</span></td><td>
+<form method="post" action="/apps/{{$.App.Status.Name}}/actions/{{.Name}}"><input type="hidden" name="csrf" value="{{$.CSRF}}">{{range $k, $v := .Input}}<input name="{{$k}}" placeholder="{{$k}}{{if $v.Required}} (required){{end}}: {{$v.Description}}">{{end}}<button type="submit">Run</button></form></td></tr>{{end}}</table>{{end}}
 {{end}}
 {{else if eq .Page "members"}}
 <h2>Members</h2>

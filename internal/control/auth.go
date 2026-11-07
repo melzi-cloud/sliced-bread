@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/melzi-cloud/sliced-bread/internal/apps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -382,6 +383,10 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		s.handleExchange(w, host, uri)
 		return
 	}
+	if strings.HasPrefix(uri, apps.EnterPath) {
+		s.handleEnter(w, r, host, uri)
+		return
+	}
 	if email, _, ok := s.auth.findSession(r, AppCookie, host, kindApp); ok {
 		w.Header().Set("X-Sb-User", email)
 		w.Header().Set("X-Sb-Email", email)
@@ -471,4 +476,26 @@ func (s *Server) checkCSRF(r *http.Request) bool {
 		return false
 	}
 	return got != "" && subtle.ConstantTimeCompare([]byte(c.Value), []byte(got)) == 1
+}
+
+// handleEnter serves /__sb/enter?to=<path> on app hosts: it makes sure the browser has a
+// session for the app host (through the login wall if needed), then opens the path. Setup
+// links use it so that a browser can pass wallPaths of an app that is otherwise open.
+func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request, host, uri string) {
+	u, err := url.Parse(uri)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	to := u.Query().Get("to")
+	if !safeLocalPath(to) {
+		to = "/"
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if _, _, ok := s.auth.findSession(r, AppCookie, host, kindApp); ok {
+		w.Header().Set("Location", "https://"+host+to)
+		w.WriteHeader(http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, "https://"+s.hosts().Auth()+"/login?rd="+url.QueryEscape("https://"+host+uri), http.StatusFound)
 }

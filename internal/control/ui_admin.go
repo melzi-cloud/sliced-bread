@@ -320,8 +320,8 @@ func (s *Server) adminRoutes(m *http.ServeMux) {
 			s.renderApp(w, r, email, nil, "No such action.")
 			return
 		}
-		if act.AdminOnly && s.auth.Role(email) != RoleAdmin {
-			s.renderApp(w, r, email, nil, "Only admins can run this action.")
+		if (act.HasSecretOutput() || act.Approval) && !s.auth.CanApprove(email) {
+			s.renderApp(w, r, email, nil, "Only people who can approve changes can run this action (it shows credentials or changes the app).")
 			return
 		}
 		input := map[string]string{}
@@ -336,7 +336,31 @@ func (s *Server) adminRoutes(m *http.ServeMux) {
 			return
 		}
 		s.logf("action %s/%s run by %s in the dashboard", a.Name, act.Name, email)
-		s.renderApp(w, r, email, &actionResult{Action: act.Name, Rows: resultRows(res)}, "")
+		all := map[string]any{}
+		for k, v := range res.Result {
+			all[k] = v
+		}
+		for k, v := range res.Secret {
+			all[k] = v // a signed-in human may see these (D-030)
+		}
+		s.renderApp(w, r, email, &actionResult{Action: act.Name, Rows: resultRows(all)}, "")
+	}))
+	m.HandleFunc("POST /apps/{name}/secrets/{key}", s.requireSession(func(w http.ResponseWriter, r *http.Request, email string) {
+		if !s.checkCSRF(r) {
+			s.renderApp(w, r, email, nil, "Form expired, try again.")
+			return
+		}
+		if !s.auth.CanApprove(email) {
+			s.renderApp(w, r, email, nil, "Only people who can approve changes can enter secret values.")
+			return
+		}
+		key, value := r.PathValue("key"), r.PostFormValue("value")
+		if err := s.provideSecret(r.Context(), r.PathValue("name"), key, value); err != nil {
+			s.renderApp(w, r, email, nil, err.Error())
+			return
+		}
+		s.logf("secret %s of %s entered by %s", key, r.PathValue("name"), email)
+		http.Redirect(w, r, "/apps/"+r.PathValue("name"), http.StatusSeeOther)
 	}))
 }
 
@@ -393,17 +417,19 @@ type actionResult struct {
 
 type appView struct {
 	Status  AppStatus
-	Actions []apps.Action
+	Actions []actionView
 	Result  *actionResult
+	Provide []provideView
+}
+
+type provideView struct {
+	Name, Description string
+	Required, Set     bool
 }
 
 func findAction(a *apps.App, name string) *apps.Action {
-	if t := apps.Catalog[a.Template]; t != nil {
-		for i := range t.Actions {
-			if t.Actions[i].Name == name {
-				return &t.Actions[i]
-			}
-		}
+	if a.TemplateDef != nil {
+		return a.TemplateDef.Action(name)
 	}
 	return nil
 }
@@ -432,8 +458,12 @@ func (s *Server) renderApp(w http.ResponseWriter, r *http.Request, email string,
 		return
 	}
 	v := &appView{Status: s.status(r.Context(), a), Result: res}
-	if t := apps.Catalog[a.Template]; t != nil {
-		v.Actions = t.Actions
+	if a.TemplateDef != nil {
+		v.Actions = actionViews(a.TemplateDef)
+	}
+	vals, _ := s.appSecret(r.Context(), a)
+	for _, p := range a.Provide {
+		v.Provide = append(v.Provide, provideView{p.Name, p.Description, p.Required, vals[p.Name] != ""})
 	}
 	s.render(w, pageData{Page: "app", Email: email, App: v, CSRF: s.csrf(w, r), Error: errMsg})
 }
@@ -494,4 +524,36 @@ encryption password sb init printed (also shown on the dashboard's Settings page
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// provideSecret stores a value a human entered for a requested secret and restarts the app.
+func (s *Server) provideSecret(ctx context.Context, app, key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, err := s.getApp(ctx, app)
+	if err != nil {
+		return err
+	}
+	ok := false
+	for _, p := range a.Provide {
+		ok = ok || p.Name == key
+	}
+	if !ok {
+		return fmt.Errorf("%s does not ask for %s", app, key)
+	}
+	value = strings.TrimRight(value, "\r\n")
+	if value == "" || len(value) > 8192 {
+		return fmt.Errorf("enter a value (up to 8 KB)")
+	}
+	if err := s.setSecrets(ctx, a, map[string]string{key: value}, nil); err != nil {
+		return err
+	}
+	if a.Hooks == nil {
+		a.Hooks = map[string]string{}
+	}
+	a.Hooks["provided/"+key] = "true"
+	if err := s.saveInternal(ctx, a); err != nil {
+		return err
+	}
+	return s.reconcile(ctx, a)
 }

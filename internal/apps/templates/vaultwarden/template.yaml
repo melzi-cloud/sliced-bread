@@ -1,0 +1,50 @@
+apiVersion: bakery.slicedbread.dev/v1
+name: vaultwarden
+version: 1.0.0
+description: Password manager compatible with Bitwarden apps and browser extensions.
+upstream: {project: Vaultwarden, url: https://github.com/dani-garcia/vaultwarden, licence: AGPL-3.0}
+access:
+  mode: app-auth               # Bitwarden clients cannot pass the login wall
+  wallPaths: [/identity/accounts/register, /api/accounts/register]
+components:
+  - name: web
+    image: docker.io/vaultwarden/server:1.37.5@sha256:4fe17f415f90087377d37c755e0ea3cf189dcc6794e49cdd2a9adbb4937d9e1f
+    port: 8080
+    health: {path: /alive}
+    resources: {cpu: 50m, memory: 128Mi}
+    env:
+      ROCKET_PORT: "8080"
+      DOMAIN: ${app.url}
+      SIGNUPS_ALLOWED: "true"   # safe: registration is behind the login wall
+      INVITATIONS_ALLOWED: "false"
+      SHOW_PASSWORD_HINT: "false"
+      # Vaultwarden's default (WAL, synchronous=NORMAL) loses the last seconds of changes on
+      # a hard power loss; FULL syncs every commit (found by the node-loss test).
+      DATABASE_CONN_INIT: "PRAGMA busy_timeout = 5000; PRAGMA synchronous = FULL;"
+    volumes: [{name: data, path: /data, size: 10Gi}]
+settings:
+  - name: signup_domain
+    description: Only allow accounts with email addresses at this domain (empty means any member of the install).
+    type: string
+    pattern: '^([a-z0-9-]+\.)+[a-z]{2,}$'
+    default: ""
+    env: {SIGNUPS_DOMAINS_WHITELIST: "${setting.signup_domain}"}
+forbidEnv: [ADMIN_TOKEN, SIGNUPS_ALLOWED, SIGNUPS_DOMAINS_WHITELIST]
+backup: {consistency: stop, require: [data/db.sqlite3]}
+actions:
+  - name: has_account
+    description: Whether at least one Vaultwarden account exists.
+    image: docker.io/library/node:24.22.2-alpine3.24@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    volumes: [data]
+    run: actions/has-account.mjs
+    output: {done: {type: boolean}, accounts: {type: number}}
+setup:
+  - name: first_account
+    description: Create your Vaultwarden account (members of this install can create one at any time).
+    link: /#/signup
+    doneWhen: has_account
+notes: |
+  Only members of this install can create accounts: registration passes the SlicedBread login wall,
+  everything else does not, so Bitwarden apps and extensions work. Give people the account link from
+  sb status (it signs them in first). Clients: in the Bitwarden app or extension choose Self-hosted
+  and enter the app URL. Data lives on a persistent volume.

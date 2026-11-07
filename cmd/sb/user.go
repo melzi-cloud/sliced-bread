@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -65,7 +64,9 @@ Deploy (exactly one source)
   sb deploy <app> --dir <local-path> [--port N] [--dry-run]   (uploads source; built with Railpack or its Dockerfile;
                                                                 --dry-run lists the files that would be uploaded)
   sb deploy <app> --repo <https-git-url> [--branch B] [--path dir] [--port N]   (public repos)
-    common flags: --env KEY=VALUE (repeatable), --secrets-stdin (KEY=VALUE lines on stdin),
+  sb deploy <app> --template-dir <path>   a template you are writing (template.yaml, actions/, files/); see the skill file
+    common flags: --env KEY=VALUE (repeatable), --generate KEY (a random secret made by the server),
+                  --request KEY[:description] (a secret the user enters in the dashboard),
                   --database (Postgres; sets DATABASE_URL), --health-path /healthz,
                   --access wall|app-auth|public (default wall), --public-path /path (repeatable)
   sb wait <app> [--timeout 10m]       block until the latest version is serving and ready (exit 1 if its build failed)
@@ -73,7 +74,9 @@ Deploy (exactly one source)
 Operate
   sb logs <app> [--build] [--tail N]
   sb env <app>                        list env keys (values of secrets are never shown)
-  sb env set <app> KEY=VALUE... [--secrets-stdin]
+  sb env set <app> KEY=VALUE...       plain values only; never put secrets here
+  sb env generate <app> KEY...        the server generates a random secret (you never see it)
+  sb env request <app> KEY [--description text]   the user enters the value in the dashboard
   sb env unset <app> KEY...
   sb settings <app> key=value...      template settings, e.g. vaultwarden signups=true
   sb access <app> wall|app-auth|public [--public-path /path]...
@@ -227,21 +230,83 @@ func kvs(items []string, what string) (map[string]string, error) {
 	return out, nil
 }
 
-func readSecretsStdin() (map[string]string, error) {
+// readTemplateDir reads a template directory: template.yaml plus every other file.
+func readTemplateDir(dir string) (map[string]string, error) {
 	out := map[string]string{}
-	sc := bufio.NewScanner(os.Stdin)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+	total := 0
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			return nil, &exitErr{exitUsage, "--secrets-stdin expects KEY=VALUE lines"}
+		if d.IsDir() {
+			if n := d.Name(); p != dir && (strings.HasPrefix(n, ".") || n == "node_modules") {
+				return filepath.SkipDir
+			}
+			return nil
 		}
-		out[strings.TrimSpace(k)] = v
+		rel, _ := filepath.Rel(dir, p)
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		total += len(b)
+		if total > 512<<10 {
+			return fmt.Errorf("template directory is larger than 512 KB")
+		}
+		out[filepath.ToSlash(rel)] = string(b)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return out, sc.Err()
+	if _, ok := out["template.yaml"]; !ok {
+		return nil, &exitErr{exitUsage, dir + " has no template.yaml"}
+	}
+	return out, nil
+}
+
+// secretRequests turns KEY[:description] flags into requests.
+func secretRequests(rs []string) []map[string]any {
+	var out []map[string]any
+	for _, r := range rs {
+		k, d, _ := strings.Cut(r, ":")
+		out = append(out, map[string]any{"name": k, "description": d, "required": true})
+	}
+	return out
+}
+
+// actionInfo is an action as sb catalog and sb status print it.
+type actionInfo struct {
+	Name, Description string
+	Input             map[string]struct {
+		Type, Description string
+		Required          bool
+	}
+	On        string
+	Approval  bool
+	HumanOnly bool
+}
+
+func (a actionInfo) line() string {
+	var ins []string
+	for k, f := range a.Input {
+		s := "--input " + k + "=<" + f.Description + ">"
+		if !f.Required {
+			s = "[" + s + "]"
+		}
+		ins = append(ins, s)
+	}
+	sort.Strings(ins)
+	out := strings.TrimSpace(a.Name+" "+strings.Join(ins, " ")) + ": " + a.Description
+	switch {
+	case a.On == "install":
+		out += " [runs by itself when the app is installed]"
+	case a.HumanOnly:
+		out += " [shows credentials: a human runs it on the app page in the dashboard]"
+	case a.Approval:
+		out += " [needs human approval]"
+	}
+	return out
 }
 
 var jsonMode bool
@@ -426,49 +491,50 @@ func runUser(args []string) error {
 		}
 		var cat struct {
 			Templates []struct {
-				Name, Description, Access, Notes string
-				Settings                         []struct {
-					Name, Description, Default string
-					Values, ApprovalFor        []string
+				Name, Version, Description, Access, Notes string
+				Components                                []string
+				Database                                  bool
+				Secrets                                   []string
+				Settings                                  []struct {
+					Name, Description, Type, Default string
+					Values, ApprovalFor              []string
 				}
-				Actions []struct {
-					Name, Description string
-					Input             map[string]string
-					AdminOnly         bool
-				}
+				Actions []actionInfo
+				Setup   []struct{ Name, Description string }
 			}
 		}
 		json.Unmarshal(b, &cat)
 		for _, t := range cat.Templates {
-			fmt.Printf("%s: %s\n  access: %s\n", t.Name, t.Description, t.Access)
+			fmt.Printf("%s %s: %s\n  access: %s; components: %s", t.Name, t.Version, t.Description, t.Access, strings.Join(t.Components, ", "))
+			if t.Database {
+				fmt.Print("; Postgres database")
+			}
+			fmt.Println()
 			for _, st := range t.Settings {
-				vals := strings.Join(st.Values, "|")
-				if vals == "" {
-					vals = "free text"
+				vals := st.Type
+				if len(st.Values) > 0 {
+					vals = strings.Join(st.Values, "|")
 				}
 				def := st.Default
 				if def == "" {
 					def = "empty"
 				}
-				fmt.Printf("  setting %s (values: %s; default: %s)", st.Name, vals, def)
+				fmt.Printf("  setting %s (%s; default: %s)", st.Name, vals, def)
 				if len(st.ApprovalFor) > 0 {
 					fmt.Printf(" [%s needs human approval]", strings.Join(st.ApprovalFor, ","))
 				}
 				fmt.Printf(": %s\n", st.Description)
 			}
 			for _, ac := range t.Actions {
-				var ins []string
-				for k, v := range ac.Input {
-					ins = append(ins, "--input "+k+"=<"+v+">")
-				}
-				sort.Strings(ins)
-				admin := ""
-				if ac.AdminOnly {
-					admin = " [admin token only: ask the user to run it]"
-				}
-				fmt.Printf("  action %s %s: %s%s\n", ac.Name, strings.Join(ins, " "), ac.Description, admin)
+				fmt.Printf("  action %s\n", ac.line())
 			}
-			fmt.Printf("  notes: %s\n\n", t.Notes)
+			for _, sp := range t.Setup {
+				fmt.Printf("  setup for the human: %s\n", sp.Description)
+			}
+			if len(t.Secrets) > 0 {
+				fmt.Printf("  secrets (values never shown): %s\n", strings.Join(t.Secrets, ", "))
+			}
+			fmt.Printf("  notes: %s\n\n", strings.TrimSpace(t.Notes))
 		}
 		return nil
 
@@ -533,7 +599,10 @@ func runUser(args []string) error {
 		path := fs.String("path", "", "")
 		port := fs.Int("port", 0, "")
 		access := fs.String("access", "", "")
-		secretsStdin := fs.Bool("secrets-stdin", false, "")
+		tmplDir := fs.String("template-dir", "", "")
+		var gens, reqs multi
+		fs.Var(&gens, "generate", "")
+		fs.Var(&reqs, "request", "")
 		database := fs.Bool("database", false, "")
 		healthPath := fs.String("health-path", "", "")
 		fs.Var(&env, "env", "")
@@ -562,6 +631,19 @@ func runUser(args []string) error {
 		}
 		if *image != "" {
 			req["image"] = *image
+		}
+		if *tmplDir != "" {
+			files, err := readTemplateDir(*tmplDir)
+			if err != nil {
+				return err
+			}
+			req["templateFiles"] = files
+		}
+		if len(gens) > 0 {
+			req["generate"] = []string(gens)
+		}
+		if len(reqs) > 0 {
+			req["request"] = secretRequests(reqs)
 		}
 		if *repo != "" {
 			req["repo"] = map[string]string{"url": *repo, "branch": *branch, "path": *path}
@@ -597,13 +679,6 @@ func runUser(args []string) error {
 		if len(pubs) > 0 {
 			req["publicPaths"] = []string(pubs)
 		}
-		if *secretsStdin {
-			sec, err := readSecretsStdin()
-			if err != nil {
-				return err
-			}
-			req["secrets"] = sec
-		}
 		b, code, err := c.call("POST", "/v1/apps", req)
 		if err != nil {
 			return err
@@ -628,6 +703,8 @@ func runUser(args []string) error {
 	case "logs":
 		build := fs.Bool("build", false, "")
 		tail := fs.Int("tail", 0, "")
+		component := fs.String("component", "", "")
+		action := fs.String("action", "", "")
 		pos, err := parse(fs, rest)
 		if err != nil {
 			return err
@@ -646,6 +723,12 @@ func runUser(args []string) error {
 		if *build {
 			q += "&build=1"
 		}
+		if *component != "" {
+			q += "&component=" + url.QueryEscape(*component)
+		}
+		if *action != "" {
+			q += "&action=" + url.QueryEscape(*action)
+		}
 		b, _, err := c.call("GET", "/v1/apps/"+url.PathEscape(app)+"/logs"+q, nil)
 		if err != nil {
 			return err
@@ -654,7 +737,7 @@ func runUser(args []string) error {
 		return nil
 
 	case "env":
-		secretsStdin := fs.Bool("secrets-stdin", false, "")
+		desc := fs.String("description", "", "")
 		pos, err := parse(fs, rest)
 		if err != nil {
 			return err
@@ -667,10 +750,11 @@ func runUser(args []string) error {
 			var st struct {
 				Env        map[string]string `json:"env"`
 				SecretKeys []string          `json:"secretKeys"`
+				Secrets    []string          `json:"secrets"`
 			}
 			json.Unmarshal(b, &st)
 			if jsonMode {
-				out, _ := json.Marshal(map[string]any{"env": st.Env, "secretKeys": st.SecretKeys})
+				out, _ := json.Marshal(map[string]any{"env": st.Env, "secretKeys": st.SecretKeys, "secrets": st.Secrets})
 				c.print(out)
 				return nil
 			}
@@ -687,38 +771,38 @@ func runUser(args []string) error {
 			}
 			return nil
 		}
-		if len(pos) < 2 || (pos[0] != "set" && pos[0] != "unset") {
-			return &exitErr{exitUsage, "usage: sb env <app> | sb env set <app> KEY=VALUE... [--secrets-stdin] | sb env unset <app> KEY..."}
+		usage := "usage: sb env <app> | sb env set <app> KEY=VALUE... | sb env unset <app> KEY... | sb env generate <app> KEY... | sb env request <app> KEY [--description text]"
+		if len(pos) < 3 {
+			return &exitErr{exitUsage, usage}
 		}
 		app := pos[1]
 		req := map[string]any{}
-		if pos[0] == "set" {
+		switch pos[0] {
+		case "set":
 			set, err := kvs(pos[2:], "env")
 			if err != nil {
 				return err
 			}
-			if len(set) > 0 {
-				req["set"] = set
-			}
-			if *secretsStdin {
-				sec, err := readSecretsStdin()
-				if err != nil {
-					return err
-				}
-				req["secrets"] = sec
-			}
-			if len(req) == 0 {
-				return &exitErr{exitUsage, "nothing to set"}
-			}
-		} else {
-			if len(pos) < 3 {
-				return &exitErr{exitUsage, "usage: sb env unset <app> KEY..."}
-			}
+			req["set"] = set
+		case "unset":
 			req["unset"] = pos[2:]
+		case "generate":
+			req["generate"] = pos[2:]
+		case "request":
+			var rs []map[string]any
+			for _, k := range pos[2:] {
+				rs = append(rs, map[string]any{"name": k, "description": *desc, "required": true})
+			}
+			req["request"] = rs
+		default:
+			return &exitErr{exitUsage, usage}
 		}
 		b, _, err := c.call("PATCH", "/v1/apps/"+url.PathEscape(app)+"/env", req)
 		if err != nil {
 			return err
+		}
+		if pos[0] == "request" && !jsonMode {
+			fmt.Printf("requested %s: the user enters the value(s) on the app page in the dashboard: %s\n", strings.Join(pos[2:], ", "), c.dashboardURL("/apps/"+app))
 		}
 		return c.printAppResult(b)
 
@@ -780,9 +864,12 @@ func runUser(args []string) error {
 		if err != nil {
 			return err
 		}
-		b, _, err := c.call("POST", "/v1/apps/"+url.PathEscape(pos[0])+"/actions/"+url.PathEscape(pos[1]), map[string]any{"input": in})
+		b, code, err := c.slow().call("POST", "/v1/apps/"+url.PathEscape(pos[0])+"/actions/"+url.PathEscape(pos[1]), map[string]any{"input": in})
 		if err != nil {
 			return err
+		}
+		if code == http.StatusAccepted {
+			return c.approvalExit(b)
 		}
 		if jsonMode {
 			c.print(b)
@@ -988,14 +1075,35 @@ func printStatus(st map[string]any) {
 	if len(keys) > 0 {
 		fmt.Println("env:", strings.Join(keys, " "))
 	}
+	if cs, ok := st["components"].([]any); ok && len(cs) > 1 {
+		fmt.Printf("components: %v (logs: sb logs <app> --component <name>)\n", cs)
+	}
+	if wp, ok := st["wallPaths"].([]any); ok && len(wp) > 0 {
+		fmt.Printf("paths behind the login wall: %v\n", wp)
+	}
+	if sec, ok := st["secrets"].([]any); ok && len(sec) > 0 {
+		fmt.Printf("secrets (values never shown): %v\n", sec)
+	}
 	if acts, ok := st["actions"].([]any); ok && len(acts) > 0 {
-		for _, a := range acts {
-			m, _ := a.(map[string]any)
-			admin := ""
-			if m["adminOnly"] == true {
-				admin = " [admin token only]"
+		b, _ := json.Marshal(acts)
+		var list []actionInfo
+		json.Unmarshal(b, &list)
+		for _, a := range list {
+			fmt.Printf("action: %s\n", a.line())
+		}
+	}
+	if steps, ok := st["setup"].([]any); ok {
+		for _, x := range steps {
+			m, _ := x.(map[string]any)
+			if m["done"] == true {
+				fmt.Printf("setup done: %v\n", m["description"])
+				continue
 			}
-			fmt.Printf("action: %v: %v%s\n", m["name"], m["description"], admin)
+			fmt.Printf("setup for the user (not done yet): %v", m["description"])
+			if l, _ := m["link"].(string); l != "" {
+				fmt.Printf(" -> give the user this link: %s", l)
+			}
+			fmt.Println()
 		}
 	}
 	if p, ok := st["pendingApprovals"].([]any); ok {

@@ -239,14 +239,17 @@ echo "dumped database: $(cat /sb/db/tables) tables, $(wc -c < /sb/db/db.dump) by
 mkdir -p /sb/vol /sb/meta
 cp /meta-src/app.json /meta-src/env.json /sb/meta/
 if [ -n "$SB_UPLOAD_URL" ]; then wget -qO /sb/meta/source.tar.gz "$SB_UPLOAD_URL" || { echo "SB_ERROR could not fetch the app's source for the backup"; exit 1; }; fi
-echo "SB_FILES $(find /sb/vol -type f | wc -l)"
+EXC=""; PRUNE=""
+for p in $SB_EXCLUDE; do EXC="$EXC --exclude /sb/vol/$p"; PRUNE="$PRUNE -path /sb/vol/$p -prune -o"; done
+echo "SB_FILES $(find /sb/vol $PRUNE -type f -print | wc -l)"
 if [ -f /sb/db/tables ]; then echo "SB_DB_TABLES $(cat /sb/db/tables)"; fi
-out=$(r backup --host slicedbread --tag "app=$SB_APP" --tag "run=$SB_RUN" --json /sb | grep '"message_type":"summary"')
+out=$(r backup --host slicedbread --tag "app=$SB_APP" --tag "run=$SB_RUN" $EXC --json /sb | grep '"message_type":"summary"')
 echo "SB_SNAPSHOT $(echo "$out" | sed -n 's/.*"snapshot_id":"\([0-9a-f]*\)".*/\1/p')"
 echo "SB_BYTES $(echo "$out" | sed -n 's/.*"total_bytes_processed":\([0-9]*\).*/\1/p')"
 r forget --host slicedbread --tag "app=$SB_APP" --keep-last 10 --keep-daily 14 --keep-weekly 8 --prune >/dev/null 2>&1 || echo "note: pruning old snapshots skipped (repository busy)"
 `
-	main := container("restic", resticImage, script, append(runEnv(a, run), kube.Obj{"name": "SB_UPLOAD_URL", "value": uploadURL}), resticMounts, 0)
+	main := container("restic", resticImage, script, append(runEnv(a, run), kube.Obj{"name": "SB_UPLOAD_URL", "value": uploadURL},
+		kube.Obj{"name": "SB_EXCLUDE", "value": strings.Join(a.BackupExclude, " ")}), resticMounts, 0)
 	main["envFrom"] = []any{envFromSecret()}
 	return jobSpec{name: "backup-" + a.Name + "-" + run.ID, ns: apps.Namespace(a.Name), app: a, run: run,
 		init: inits, main: main, volumes: vols, nodeName: nodeName}.obj()
@@ -390,12 +393,8 @@ func (s *Server) launch(ctx context.Context, c *BackupConfig, a *apps.App, run *
 		node := ""
 		if !a.Paused && len(a.Volumes) > 0 {
 			// A live volume is attached to the app's node; the job must run there too.
-			pods, _ := s.kube.List(ctx, "v1", "Pod", apps.Namespace(a.Name), apps.AppLabel+"="+a.Name)
-			for _, p := range pods {
-				if n := kube.Str(p, "spec", "nodeName"); n != "" && kube.Str(p, "metadata", "deletionTimestamp") == "" && kube.Str(p, "status", "phase") == "Running" {
-					node = n
-				}
-			}
+			// (in v1 all of an app's volumes belong to one component)
+			node = s.volumeNode(ctx, a, a.Volumes[0].Name)
 		}
 		if err := s.writeBackupMeta(ctx, a); err != nil {
 			return err

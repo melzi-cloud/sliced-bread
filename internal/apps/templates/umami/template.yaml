@@ -1,0 +1,83 @@
+apiVersion: bakery.slicedbread.dev/v1
+name: umami
+version: 1.0.0
+description: Privacy-friendly web analytics with a Postgres database.
+upstream: {project: Umami, url: https://umami.is, licence: MIT}
+access:
+  mode: wall
+  publicPaths: [/script.js, /api/send]   # websites report visits without a session
+components:
+  - name: web
+    image: ghcr.io/umami-software/umami:3.4.1@sha256:e69d1a7932e9dab0fc523edc7be1f3a53f3c261f57856fc2167ae74a8fc022e8
+    port: 3000
+    health: {path: /api/heartbeat}
+    resources: {cpu: 100m, memory: 384Mi}
+    env:
+      DATABASE_URL: ${db.url}
+      APP_SECRET: ${secret.APP_SECRET}
+database: {postgres: {version: "17"}}
+secrets:
+  generate:
+    - {name: APP_SECRET, bytes: 32, format: hex}
+    - {name: UMAMI_ADMIN_PASSWORD, bytes: 24, format: alnum}
+actions:
+  - name: set_admin_password
+    description: Replace Umami's default admin password with a generated one.
+    on: install
+    image: docker.io/library/node:24.22.2-alpine3.24@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    run: actions/set-admin-password.mjs
+    secrets: [UMAMI_ADMIN_PASSWORD]
+  - name: create_website
+    description: Register a website and return the tracking snippet to add to its HTML <head>.
+    image: docker.io/library/node:24.22.2-alpine3.24@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    run: actions/create-website.mjs
+    secrets: [UMAMI_ADMIN_PASSWORD]
+    input:
+      name: {type: string, required: true, description: display name}
+      domain: {type: string, required: true, description: "site domain without scheme, e.g. shop.example.com"}
+    output:
+      website_id: {type: string}
+      name: {type: string}
+      domain: {type: string}
+      script_url: {type: string}
+      snippet: {type: string}
+      next: {type: string}
+  - name: test_event
+    description: Send one labelled test page view (path /sb-test-event) to a website and confirm Umami counted it.
+    image: docker.io/library/node:24.22.2-alpine3.24@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    run: actions/test-event.mjs
+    secrets: [UMAMI_ADMIN_PASSWORD]
+    input:
+      website_id: {type: string, description: optional when there is only one website}
+    output:
+      website_id: {type: string}
+      domain: {type: string}
+      pageviews_before: {type: number}
+      pageviews_after: {type: number}
+      counted: {type: boolean}
+      note: {type: string}
+  - name: stats
+    description: Page views and visitors per website over the last 24 hours. Use it to verify tracking works.
+    image: docker.io/library/node:24.22.2-alpine3.24@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    run: actions/stats.mjs
+    secrets: [UMAMI_ADMIN_PASSWORD]
+    input:
+      hours: {type: number, description: "look-back window in hours (default 24)"}
+    output:
+      hours: {type: number}
+      websites: {type: array}
+  - name: dashboard_login
+    description: The Umami dashboard login. The password is shown only to a signed-in human in the SlicedBread dashboard.
+    image: docker.io/library/node:24.22.2-alpine3.24@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
+    run: actions/dashboard-login.mjs
+    secrets: [UMAMI_ADMIN_PASSWORD]
+    output:
+      url: {type: string}
+      username: {type: string}
+      password: {type: string, secret: true}
+notes: |
+  The dashboard sits behind the SlicedBread login wall and also has its own Umami login (dashboard_login,
+  shown to humans in the dashboard). The tracker script (/script.js) and event endpoint (/api/send) are
+  public so websites can report visits. Use create_website to get a snippet; do not create sites through
+  the UI. If the tracked app is behind the wall, only signed-in team members' visits are counted. Verify
+  tracking with test_event (it adds one page view at /sb-test-event) and read counts with stats.
