@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
@@ -72,6 +73,7 @@ type Server struct {
 	alertsCache       []Alert
 	fallback          fallbackState
 	isLeader          bool
+	draining          atomic.Bool
 	imageCheckAt      time.Time
 	sharedGCAt        time.Time
 }
@@ -102,6 +104,10 @@ func (s *Server) Handler() http.Handler {
 		host := strings.ToLower(strings.Split(r.Host, ":")[0])
 		switch {
 		case r.URL.Path == "/healthz":
+			if s.draining.Load() {
+				http.Error(w, "shutting down", http.StatusServiceUnavailable)
+				return
+			}
 			w.Write([]byte("ok\n"))
 		case host == s.cfg.InternalHostname || host == "sb-control" || host == "sb-control.sb-system" || host == "sb-control.sb-system.svc":
 			switch r.URL.Path {
@@ -136,6 +142,11 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.loop(ctx)
 	go func() {
 		<-ctx.Done()
+		// Fail readiness first and keep serving a few seconds, so Traefik and kube-proxy
+		// stop sending login-wall checks here before the listener closes (a refused check
+		// shows as a 500 on the app).
+		s.draining.Store(true)
+		time.Sleep(6 * time.Second)
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		srv.Shutdown(sctx)

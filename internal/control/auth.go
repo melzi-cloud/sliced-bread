@@ -75,6 +75,7 @@ type Auth struct {
 	used        map[string]int64 // redeemed exchange nonces (tests; replicas use ConfigMaps)
 	rv          string           // resourceVersion of the loaded sb-auth Secret
 	refreshedAt time.Time        // last reload
+	missAt      time.Time        // last reload because a token or user was not found
 }
 
 // MintToken creates and persists a new API token, returning its plaintext once.

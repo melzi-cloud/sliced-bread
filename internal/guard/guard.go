@@ -639,7 +639,8 @@ func (g *Guard) ensureCoreDNS(ctx context.Context) error {
 		keep = append(keep, t)
 	}
 	aff, _ := pod["affinity"].(map[string]any)
-	_, hasAffinity := aff["podAntiAffinity"]
+	anti, _ := aff["podAntiAffinity"].(map[string]any)
+	_, hasAffinity := anti["preferredDuringSchedulingIgnoredDuringExecution"]
 	if fmt.Sprint(spec["replicas"]) == "2" && has["node.kubernetes.io/not-ready"] && has["node.kubernetes.io/unreachable"] && hasAffinity {
 		return nil
 	}
@@ -653,9 +654,13 @@ func (g *Guard) ensureCoreDNS(ctx context.Context) error {
 		"replicas": 2,
 		"template": map[string]any{"spec": map[string]any{
 			"tolerations": keep,
-			"affinity": map[string]any{"podAntiAffinity": map[string]any{"requiredDuringSchedulingIgnoredDuringExecution": []any{
-				map[string]any{"topologyKey": "kubernetes.io/hostname", "labelSelector": map[string]any{"matchLabels": map[string]any{"k8s-app": "kube-dns"}}},
-			}}},
+			// Preferred, not required: with one server cordoned for a reboot, a required rule
+			// leaves the surge pod of a restart nowhere to go.
+			"affinity": map[string]any{"podAntiAffinity": map[string]any{
+				"requiredDuringSchedulingIgnoredDuringExecution": nil,
+				"preferredDuringSchedulingIgnoredDuringExecution": []any{map[string]any{"weight": 100, "podAffinityTerm": map[string]any{
+					"topologyKey": "kubernetes.io/hostname", "labelSelector": map[string]any{"matchLabels": map[string]any{"k8s-app": "kube-dns"}}}}},
+			}},
 		}},
 	}})
 }

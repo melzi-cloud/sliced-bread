@@ -512,8 +512,9 @@ func (g *Guard) moveWorkloads(ctx context.Context, node string) (int, error) {
 			return 0, fmt.Errorf("restart %s/%s: %w", d.ns, d.name, err)
 		}
 	}
-	// Wait until the restarted deployments have no pod left on the node and are available.
-	deadline := time.Now().Add(6 * time.Minute)
+	// Wait until the restarted deployments are available elsewhere. A restart that cannot
+	// finish in 3 minutes (nowhere to put the surge pod) falls back to deleting the old pod.
+	deadline := time.Now().Add(3 * time.Minute)
 	for _, d := range keys {
 		for time.Now().Before(deadline) {
 			var dobj kube.Obj
@@ -529,6 +530,23 @@ func (g *Guard) moveWorkloads(ctx context.Context, node string) (int, error) {
 	}
 	for _, p := range others {
 		g.Kube.Delete(ctx, "v1", "Pod", kube.Str(p, "metadata", "namespace"), kube.Str(p, "metadata", "name"))
+	}
+	// Anything still on the node (a restart that could not finish) is deleted now.
+	if left, err := g.Kube.List(ctx, "v1", "Pod", "", ""); err == nil {
+		for _, p := range left {
+			if kube.Str(p, "spec", "nodeName") != node || kube.Str(p, "metadata", "namespace") == opsNamespace || kube.Str(p, "metadata", "deletionTimestamp") != "" {
+				continue
+			}
+			isDS, isGuard := false, false
+			for _, o := range owners(p) {
+				isDS = isDS || o[0] == "DaemonSet"
+				isGuard = isGuard || strings.HasPrefix(o[1], "sb-guard-")
+			}
+			if phase := kube.Str(p, "status", "phase"); isDS || isGuard || phase == "Succeeded" || phase == "Failed" {
+				continue
+			}
+			g.Kube.Delete(ctx, "v1", "Pod", kube.Str(p, "metadata", "namespace"), kube.Str(p, "metadata", "name"))
+		}
 	}
 	return len(keys) + len(others), nil
 }

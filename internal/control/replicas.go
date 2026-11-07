@@ -72,18 +72,19 @@ func (a *Auth) refresh(ctx context.Context) error {
 	return nil
 }
 
-// refreshSoon reloads the state at most once a second; used when a token or user is not
-// found, in case another replica just added it.
+// refreshSoon reloads the state when a token or user is not found, in case another
+// replica just added it. At most 4 times a second, on its own limit: the periodic reload
+// must not hold it back (a token created a moment after a periodic reload was missed).
 func (a *Auth) refreshSoon() {
-	a.mu.RLock()
-	recent := time.Since(a.refreshedAt) < time.Second
-	a.mu.RUnlock()
+	a.mu.Lock()
+	recent := time.Since(a.missAt) < 250*time.Millisecond
+	if !recent {
+		a.missAt = time.Now()
+	}
+	a.mu.Unlock()
 	if recent || a.kube == nil {
 		return
 	}
-	a.mu.Lock()
-	a.refreshedAt = time.Now()
-	a.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	a.refresh(ctx)
