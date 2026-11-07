@@ -353,6 +353,10 @@ func (s *Server) tick(ctx context.Context) {
 		s.logf("tick: list apps: %v", err)
 		return
 	}
+	bc, err := s.backupConfig(ctx)
+	if err != nil {
+		s.logf("tick: backup config: %v", err)
+	}
 	for _, a := range list {
 		s.mu.Lock()
 		cur, err := s.getApp(ctx, a.Name)
@@ -370,6 +374,13 @@ func (s *Server) tick(ctx context.Context) {
 		if changed := s.runHooks(ctx, cur); changed {
 			if err := s.saveInternal(ctx, cur); err != nil {
 				s.logf("tick: save hooks %s: %v", cur.Name, err)
+			}
+		}
+		if s.checkBackups(ctx, cur, bc) {
+			if err := s.saveInternal(ctx, cur); err != nil {
+				s.logf("tick: save backups %s: %v", cur.Name, err)
+			} else if err := s.reconcile(ctx, cur); err != nil {
+				s.logf("tick: reconcile %s: %v", cur.Name, err)
 			}
 		}
 		s.mu.Unlock()
@@ -400,6 +411,7 @@ type AppStatus struct {
 	Actions      []apps.Action     `json:"actions,omitempty"`
 	Database     string            `json:"database,omitempty"`
 	Notes        string            `json:"notes,omitempty"`
+	Backups      string            `json:"backups,omitempty"`
 }
 
 func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
@@ -422,7 +434,8 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 		vols = append(vols, "postgres")
 	}
 	if len(vols) > 0 {
-		st.Storage = "persistent volumes (" + strings.Join(vols, ", ") + ") survive restarts and redeploys; deleting the app deletes them; no backups yet in this prototype"
+		st.Storage = "persistent volumes (" + strings.Join(vols, ", ") + ") survive restarts and redeploys; deleting the app deletes them"
+		st.Backups = backupSummary(a)
 	}
 	switch {
 	case a.Template != "":
@@ -459,6 +472,10 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 		case "failed":
 			st.State, st.Message = "build-failed", a.Build.Message
 		}
+		return st
+	}
+	if a.Paused {
+		st.State, st.Message = "paused", "stopped while a backup or restore copies its data; it starts again by itself (see: sb backups "+a.Name+")"
 		return st
 	}
 	var dep kube.Obj

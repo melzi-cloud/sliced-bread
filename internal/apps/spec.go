@@ -37,6 +37,42 @@ type App struct {
 	Build       *BuildState       `json:"build,omitempty"`
 	Hooks       map[string]string `json:"hooks,omitempty"` // template hook progress, e.g. umami admin password set
 	Generation  int64             `json:"generation,omitempty"`
+
+	// Backups. BackupStop stops the app while its volumes are copied (for SQLite and similar
+	// files that are unsafe to copy while open). BackupRequire lists files, relative to the
+	// volume root (<volume>/<path>), that a restored backup must contain and be non-empty.
+	BackupStop    bool         `json:"backupStop,omitempty"`
+	BackupRequire []string     `json:"backupRequire,omitempty"`
+	Paused        bool         `json:"paused,omitempty"` // scaled to 0 for a backup or a restore
+	Backup        *BackupState `json:"backup,omitempty"`
+}
+
+// HasData reports whether the app has anything to back up.
+func (a *App) HasData() bool { return a.Database || len(a.Volumes) > 0 }
+
+// BackupState tracks backups, restore tests and restores of an app.
+type BackupState struct {
+	Running     *BackupRun  `json:"running,omitempty"`
+	LastBackup  *BackupRun  `json:"lastBackup,omitempty"`
+	LastTest    *BackupRun  `json:"lastTest,omitempty"`
+	LastRestore *BackupRun  `json:"lastRestore,omitempty"`
+	History     []BackupRun `json:"history,omitempty"` // successful backups, newest first
+}
+
+// BackupRun is one backup, restore test or restore.
+type BackupRun struct {
+	ID         string `json:"id"`
+	Kind       string `json:"kind"`  // backup, test, restore
+	Phase      string `json:"phase"` // stopping, running, succeeded, failed
+	Trigger    string `json:"trigger,omitempty"`
+	Snapshot   string `json:"snapshot,omitempty"`
+	Files      int    `json:"files,omitempty"`
+	Bytes      int64  `json:"bytes,omitempty"`
+	DBTables   int    `json:"dbTables,omitempty"`
+	DBRows     int64  `json:"dbRows,omitempty"`
+	StartedAt  string `json:"startedAt"`
+	FinishedAt string `json:"finishedAt,omitempty"`
+	Message    string `json:"message,omitempty"`
 }
 
 // Repo is a git source built with Railpack (or its Dockerfile if present).

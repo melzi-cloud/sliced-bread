@@ -39,6 +39,7 @@ Install (on your own Hetzner account)
   sb init --domain apps.example.com --email you@example.com [--size 1|3]   see: sb init --help
   sb installs                         installs created from this machine
   sb upgrade <install-id>             roll out the control plane built into this sb
+  sb ssh <install-id> [node]          print an SSH command for a node (host key pinned)
   sb destroy <install-id>             delete an install and all its data
 
 Setup
@@ -74,6 +75,16 @@ Operate
   sb action <app> <action> [--input key=value]...
   sb redeploy <app> [--dir <path>]    rebuild (upload new source with --dir), or restart image apps
   sb delete <app>
+
+Backups (apps with a volume or database; each backup is followed by a restore test)
+  sb backups [<app>]                  target, schedule, last backup and restore test per app (one app: snapshots too)
+  sb backup <app> [--wait]            back up now
+  sb restore-test <app> [--snapshot ID] [--wait]   restore a snapshot into a scratch namespace and check it
+  sb restore <app> [--snapshot ID] [--wait]        replace the app's data with a snapshot (latest by default);
+                                                   stops the app meanwhile; agents need human approval
+  sb backups configure --endpoint https://... --bucket B [--region auto] [--hour 3]   admin token; keys from env
+  sb backups password                 admin token: the backups' encryption password
+  sb export <dir> [--include-secrets] admin token: every app as Kubernetes manifests
 
 Approvals (privileged changes requested by agents)
   sb approvals [--app <app>] [--wait <id>] [--timeout 30m]   list (optionally one app), or block until a human decides
@@ -303,11 +314,8 @@ func runUser(args []string) error {
 	}
 	c := &client{cfg: cfg, http: &http.Client{Timeout: 90 * time.Second}}
 
-	needApp := func(pos []string, usage string) (string, error) {
-		if len(pos) < 1 {
-			return "", &exitErr{exitUsage, "usage: " + usage}
-		}
-		return pos[0], nil
+	if ok, err := c.runBackupCmd(cmd, fs, rest, jsonOut); ok {
+		return err
 	}
 
 	switch cmd {
@@ -1130,4 +1138,11 @@ func handleExit(err error) int {
 	}
 	fmt.Fprintln(os.Stderr, "error:", err)
 	return exitError
+}
+
+func needApp(pos []string, usage string) (string, error) {
+	if len(pos) < 1 {
+		return "", &exitErr{exitUsage, "usage: " + usage}
+	}
+	return pos[0], nil
 }

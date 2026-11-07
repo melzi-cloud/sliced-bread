@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -76,12 +77,15 @@ func baseConfig(hc, cf string) config.Dev {
 
 const initUsage = `sb init --domain <base domain> --email <admin email> [--size 1|3] [--location nbg1] [--server-type cx23]
         [--fallback-issuer zerossl|google] [--yes]
+        [--backup-endpoint https://... --backup-bucket B [--backup-region auto] [--backup-prefix path]]
 
 Creates a SlicedBread install in your own Hetzner account. Apps are served at https://<app>.<base domain>.
 Secrets (read from the environment, or prompted for on a terminal):
   HCLOUD_TOKEN           Hetzner Cloud API token (read and write). Use a dedicated Hetzner project.
   CLOUDFLARE_API_TOKEN   Cloudflare token with Zone / DNS / Edit on the zone that contains the base domain.
   SB_EAB_KID, SB_EAB_HMAC  external account binding for --fallback-issuer (optional).
+  SB_BACKUP_ACCESS_KEY_ID, SB_BACKUP_SECRET_ACCESS_KEY  S3 keys for --backup-bucket (recommended: a bucket
+                         in another location, e.g. Cloudflare R2 or Hetzner Object Storage).
 Sizes: 1 node (about EUR 4/month, no high availability) or 3 nodes plus a load balancer (about EUR 32/month).`
 
 func runInit(args []string) error {
@@ -95,6 +99,10 @@ func runInit(args []string) error {
 	fallback := fs.String("fallback-issuer", "", "")
 	yes := fs.Bool("yes", false, "")
 	ttl := fs.Duration("expire-after", 0, "") // test installs only: label resources to expire
+	bEndpoint := fs.String("backup-endpoint", "", "")
+	bBucket := fs.String("backup-bucket", "", "")
+	bRegion := fs.String("backup-region", "auto", "")
+	bPrefix := fs.String("backup-prefix", "", "")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Println(initUsage)
@@ -133,6 +141,19 @@ func runInit(args []string) error {
 			return errors.Join(kerr, herr)
 		}
 		cfg.Fallback = &config.EAB{Server: server, KeyID: kid, HMAC: hmac}
+	}
+
+	var bKey, bSecret string
+	if (*bEndpoint == "") != (*bBucket == "") {
+		return &exitErr{exitUsage, "--backup-endpoint and --backup-bucket go together"}
+	}
+	if *bBucket != "" {
+		if bKey, err = secretInput("S3 access key id", "SB_BACKUP_ACCESS_KEY_ID"); err != nil {
+			return err
+		}
+		if bSecret, err = secretInput("S3 secret access key", "SB_BACKUP_SECRET_ACCESS_KEY"); err != nil {
+			return err
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
@@ -197,6 +218,30 @@ func runInit(args []string) error {
 			return err
 		}
 	}
+	backupLine := "not configured; set up with: sb backups configure (no backups until then)"
+	if *bBucket != "" {
+		var cc cliConfig
+		json.Unmarshal(b, &cc)
+		cl := &client{cfg: cc, http: &http.Client{Timeout: 60 * time.Second}}
+		rb, _, err := cl.call("PUT", "/v1/backups/config?hour=3", map[string]any{"endpoint": *bEndpoint, "bucket": *bBucket,
+			"region": *bRegion, "prefix": *bPrefix, "hour": 3, "accessKeyId": bKey, "secretAccessKey": bSecret,
+			"password": strings.TrimSpace(os.Getenv("SB_BACKUP_PASSWORD"))})
+		if err != nil {
+			backupLine = "FAILED to configure (" + err.Error() + "); retry with: sb backups configure"
+		} else {
+			var r struct {
+				Target   string `json:"target"`
+				Password string `json:"password"`
+			}
+			json.Unmarshal(rb, &r)
+			backupLine = r.Target + ", daily at 03:00 UTC with a restore test after each backup"
+			if r.Password != "" {
+				pw := filepath.Join(st.Dir, "backup-password")
+				os.WriteFile(pw, []byte(r.Password+"\n"), 0o600)
+				backupLine += "\n               encryption password saved to " + pw + ": copy it somewhere safe, backups cannot be read without it"
+			}
+		}
+	}
 	fmt.Printf(`
 SlicedBread is ready.
   install id:  %s
@@ -204,8 +249,9 @@ SlicedBread is ready.
   dashboard:   https://auth.%s   (email and password in %s)
   this CLI:    logged in with an admin token (%s)
   your agent:  run "sb login --api https://api.%s" in the agent's environment; you approve it in the browser
+  backups:     %s
   remove:      sb destroy %s
-`, st.RunID, st.Domain, st.Domain, filepath.Join(st.Dir, "admin-login.json"), cfgPath, st.Domain, st.RunID)
+`, st.RunID, st.Domain, st.Domain, filepath.Join(st.Dir, "admin-login.json"), cfgPath, st.Domain, backupLine, st.RunID)
 	return nil
 }
 
@@ -324,5 +370,34 @@ func runUpgrade(args []string) error {
 		return err
 	}
 	fmt.Println("upgraded", st.RunID)
+	return nil
+}
+
+// runSSH prints an SSH command for a node of an install, with its host key pinned.
+func runSSH(args []string) error {
+	if len(args) < 1 {
+		return &exitErr{exitUsage, "usage: sb ssh <install-id|domain> [node number]\nPrints an SSH command (host key pinned). SSH is open only to the IP address sb init ran from."}
+	}
+	st, err := loadInstall(args[0])
+	if err != nil {
+		return err
+	}
+	i := 0
+	if len(args) > 1 {
+		fmt.Sscanf(args[1], "%d", &i)
+		i--
+	}
+	if i < 0 || i >= len(st.Nodes) {
+		return &exitErr{exitUsage, fmt.Sprintf("node must be 1-%d", len(st.Nodes))}
+	}
+	kh := filepath.Join(st.Dir, "known_hosts")
+	var lines []string
+	for _, n := range st.Nodes {
+		lines = append(lines, n.PublicIP+" "+n.HostKey)
+	}
+	if err := os.WriteFile(kh, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("ssh -i %s -o UserKnownHostsFile=%s -o StrictHostKeyChecking=yes root@%s\n", filepath.Join(st.Dir, "id_ed25519"), kh, st.Nodes[i].PublicIP)
 	return nil
 }

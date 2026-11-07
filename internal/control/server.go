@@ -217,8 +217,9 @@ func (s *Server) putApp(ctx context.Context, a *apps.App) error {
 type Approval struct {
 	ID          string    `json:"id"`
 	App         string    `json:"app"`
-	Kind        string    `json:"kind"`    // create, update, delete
-	Summary     string    `json:"summary"` // human readable
+	Kind        string    `json:"kind"`               // create, update, delete, restore
+	Snapshot    string    `json:"snapshot,omitempty"` // restore only
+	Summary     string    `json:"summary"`            // human readable
 	Desired     *apps.App `json:"desired,omitempty"`
 	BaseGen     int64     `json:"baseGeneration"` // app generation the request was based on; 0 for create
 	RequestedBy string    `json:"requestedBy,omitempty"`
@@ -327,6 +328,8 @@ func (s *Server) executeApproval(ctx context.Context, ap *Approval) error {
 	switch ap.Kind {
 	case "delete":
 		err = s.deleteApp(ctx, ap.App)
+	case "restore":
+		_, err = s.startBackupRun(ctx, cur, "restore", "approved "+ap.ID, ap.Snapshot)
 	case "create", "update":
 		if ap.Desired == nil {
 			return fmt.Errorf("approval has no desired state")
@@ -335,6 +338,7 @@ func (s *Server) executeApproval(ctx context.Context, ap *Approval) error {
 			// Approvals change access or settings, never the source: keep whatever is deployed now.
 			ap.Desired.Build, ap.Desired.Hooks, ap.Desired.Generation = cur.Build, cur.Hooks, cur.Generation
 			ap.Desired.Upload, ap.Desired.Repo = cur.Upload, cur.Repo
+			ap.Desired.Backup, ap.Desired.Paused = cur.Backup, cur.Paused
 			if cur.Template == "" {
 				ap.Desired.Image = cur.Image
 			}

@@ -44,6 +44,8 @@ func main() {
 			os.Exit(handleExit(runInstalls()))
 		case "upgrade":
 			os.Exit(handleExit(runUpgrade(args[1:])))
+		case "ssh":
+			os.Exit(handleExit(runSSH(args[1:])))
 		}
 	}
 	if len(args) > 0 && args[0] == "dev" {

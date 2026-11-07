@@ -66,6 +66,8 @@ var Catalog = map[string]*Template{
 			setDefault(a, "INVITATIONS_ALLOWED", "false")
 			setDefault(a, "SHOW_PASSWORD_HINT", "false")
 			a.Volumes = []Volume{{Name: "data", Path: "/data", Size: "10Gi"}}
+			a.BackupStop = true // SQLite: copy the file only while Vaultwarden is stopped
+			a.BackupRequire = []string{"data/db.sqlite3"}
 		},
 	},
 	"umami": {

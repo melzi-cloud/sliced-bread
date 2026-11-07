@@ -271,7 +271,7 @@ func deployment(a *App, p Params, ns string, lbl map[string]string, image string
 	hash := configHash(a, image, p.SecretVersion)
 	dep := meta("Deployment", "apps/v1", ns, "web", lbl)
 	dep["spec"] = Obj{
-		"replicas":             1,
+		"replicas":             replicas(a),
 		"revisionHistoryLimit": 3,
 		"strategy":             strategy,
 		"selector":             Obj{"matchLabels": Obj{AppLabel: a.Name}},
@@ -341,4 +341,11 @@ func AllowFromPolicy(from, to string) Obj {
 		"ingress":     []any{Obj{"from": []any{Obj{"namespaceSelector": Obj{"matchLabels": Obj{"kubernetes.io/metadata.name": Namespace(from)}}}}}},
 	}
 	return np
+}
+
+func replicas(a *App) int {
+	if a.Paused {
+		return 0
+	}
+	return 1
 }
