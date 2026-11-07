@@ -63,6 +63,7 @@ Env values and config files may use references, resolved when sb-control renders
 | `${secret.NAME}` | a secret's value (generated or human-provided) |
 | `${setting.NAME}` | a setting's current value |
 | `${component.NAME.internal}` | `http://<component>.<app-namespace>.svc.cluster.local:<port>` |
+| `${component.NAME.host}` / `${component.NAME.port}` | the same hostname and port separately, for configs that want them apart |
 | `${apps.OTHER.url}` / `${apps.OTHER.internal}` | another app's URLs |
 
 ## access
@@ -313,6 +314,10 @@ components:
     image: quay.io/invidious/invidious-companion:…@sha256:…
     port: 8282
     env: {SERVER_SECRET_KEY: "${secret.COMPANION_KEY}"}
+# files/config.yml tells web where the companion is:
+#   invidious_companion:
+#     - private_url: "${component.companion.internal}/companion"
+#   invidious_companion_key: "${secret.COMPANION_KEY}"
 routes:
   - {path: /, to: web}
   - {path: /latest_version, to: companion}
