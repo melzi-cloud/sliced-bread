@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/melzi-cloud/sliced-bread/internal/control"
+	"github.com/melzi-cloud/sliced-bread/internal/guard"
 	"github.com/melzi-cloud/sliced-bread/internal/kube"
 )
 
@@ -18,6 +19,12 @@ func main() {
 	k, err := kube.InCluster()
 	if err != nil {
 		log.Fatal(err)
+	}
+	if os.Getenv("SB_MODE") == "guard" {
+		if err := (&guard.Guard{Kube: k}).Run(ctx); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	s, err := control.New(ctx, control.ConfigFromEnv(), k)
 	if err != nil {

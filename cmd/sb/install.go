@@ -315,11 +315,13 @@ func runSetupLink(args []string) error {
 
 func loadInstall(id string) (*tenant.State, error) {
 	if st, err := tenant.LoadState(installsRoot(), id); err == nil {
+		st.RefreshNodes(context.Background()) // servers may have been replaced
 		return st, nil
 	}
 	ents, _ := os.ReadDir(installsRoot())
 	for _, e := range ents {
 		if st, err := tenant.LoadState(installsRoot(), e.Name()); err == nil && st.Domain == id {
+			st.RefreshNodes(context.Background())
 			return st, nil
 		}
 	}

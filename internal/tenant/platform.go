@@ -127,7 +127,7 @@ spec:
       containers:
         - name: sb-control
           image: {{.ControlImage}}
-          imagePullPolicy: Never
+          imagePullPolicy: IfNotPresent
           ports: [{containerPort: 8080}]
           env:
             - {name: SB_DOMAIN, value: "{{.Domain}}"}
@@ -143,6 +143,44 @@ spec:
           resources:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {memory: 256Mi}
+---
+# sb-guard replaces dead servers on 3-node installs. Same binary, no volume, and it leaves
+# an unreachable node after 20 seconds, so it is back within about a minute when its own
+# server dies.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sb-guard
+  namespace: sb-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: sb-guard}
+  template:
+    metadata:
+      labels: {app: sb-guard}
+    spec:
+      serviceAccountName: sb-control
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      tolerations:
+        - {key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 20}
+        - {key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 20}
+      containers:
+        - name: sb-guard
+          image: {{.ControlImage}}
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: SB_MODE, value: guard}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

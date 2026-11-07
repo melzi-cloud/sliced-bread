@@ -151,6 +151,7 @@ refs() { # digests mentioned inside a manifest or index
 for repo in "$R"/*; do
   [ -d "$repo" ] || continue
   app=$(basename "$repo"); items=""
+  [ "$app" = sb-control ] && continue # the control plane image, pulled by servers that join later
   for entry in $SB_KEEP; do [ "${entry%%=*}" = "$app" ] && items=$(echo "${entry#*=}" | tr , ' '); done
   if [ -z "$items" ]; then echo "removing images of $app (app gone or not built from source)"; rm -rf "$repo"; continue; fi
   keepd=""

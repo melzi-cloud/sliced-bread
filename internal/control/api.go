@@ -73,6 +73,7 @@ func (s *Server) apiMux() http.Handler {
 	m.HandleFunc("POST /v1/recreate", s.apiRecreate)
 	m.HandleFunc("GET /v1/export", s.apiExport)
 	m.HandleFunc("GET /v1/alerts", s.apiAlerts)
+	m.HandleFunc("GET /v1/nodes", s.apiNodes)
 	m.HandleFunc("GET /v1/members", s.apiMembers)
 	m.HandleFunc("POST /v1/members", s.apiInvite)
 	m.HandleFunc("DELETE /v1/members/{email}", s.apiRemoveMember)

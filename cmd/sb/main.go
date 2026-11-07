@@ -109,6 +109,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		st.RefreshNodes(ctx)
 		if err := p.DeployControl(ctx, st, root); err != nil {
 			return err
 		}
@@ -169,6 +170,7 @@ func tenantCmd(ctx context.Context, p *tenant.Provisioner, args []string) error 
 		if err != nil {
 			return err
 		}
+		st.RefreshNodes(ctx)
 		i := 0
 		if len(args) > 2 {
 			fmt.Sscanf(args[2], "%d", &i)

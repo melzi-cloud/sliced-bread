@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
+	"github.com/melzi-cloud/sliced-bread/internal/guard"
 	"github.com/melzi-cloud/sliced-bread/internal/kube"
 )
 
@@ -139,6 +140,30 @@ func (s *Server) alertConditions(ctx context.Context, list []*apps.App, bc *Back
 				name := kube.Str(n, "metadata", "name")
 				add(condition{Alert{ID: "node-down/" + name, Severity: "critical",
 					Title: "server " + name + " is not ready", Detail: why}, nodeDownGrace})
+			}
+		}
+	}
+	if rep := guard.LoadState(ctx, s.kube); rep != nil {
+		if a := rep.Active; a != nil && a.Phase != "reset" {
+			msg := "phase " + a.Phase
+			if a.Message != "" {
+				msg += ": " + a.Message
+			}
+			add(condition{Alert{ID: "node-replacing/" + a.Node, Severity: "warning",
+				Title: "server " + a.Node + " is being replaced automatically (" + a.Reason + ")", Detail: msg}, 0})
+		}
+		for _, h := range rep.History {
+			if at, _ := time.Parse(time.RFC3339, h.DetectedAt); now.Sub(at) < time.Hour {
+				switch h.Phase {
+				case "done":
+					if h.ReadyAt != "" && h.CreatedAt != "" {
+						add(condition{Alert{ID: "node-replaced/" + h.Node, Severity: "warning",
+							Title: "server " + h.Node + " was replaced automatically (" + h.Reason + ")", Detail: "back to full strength at " + h.ReadyAt}, 0})
+					}
+				case "failed":
+					add(condition{Alert{ID: "node-replace-failed/" + h.Node, Severity: "critical",
+						Title: "automatic replacement of server " + h.Node + " failed", Detail: h.Message}, 0})
+				}
 			}
 		}
 	}

@@ -99,7 +99,9 @@ func BuildControlImage(ctx context.Context, repoRoot string) (string, []byte, er
 	if img, err = mutate.Config(img, *cfg); err != nil {
 		return "", nil, err
 	}
-	ref := "sb.local/sb-control:" + tag
+	// Named for the in-cluster registry: servers that join later (replacements) pull it
+	// from there; existing servers have it imported.
+	ref := RegistryPullHost + "/sb-control:" + tag
 	tagRef, err := name.NewTag(ref)
 	if err != nil {
 		return "", nil, err
@@ -161,10 +163,26 @@ func (p *Provisioner) DeployControl(ctx context.Context, st *State, repoRoot str
 		return fmt.Errorf("remove old buildkitd: %w", err)
 	}
 	p.Logf("[%s] waiting for platform components", st.RunID)
-	return poll(ctx, 10*time.Minute, 10*time.Second, func(ctx context.Context) (bool, error) {
+	if err := poll(ctx, 10*time.Minute, 10*time.Second, func(ctx context.Context) (bool, error) {
 		_, err := st.Kubectl(ctx, "-n sb-system rollout status deploy/sb-control --timeout=15s && "+
 			"k3s kubectl -n sb-system rollout status deploy/sb-registry --timeout=15s && "+
+			"k3s kubectl -n sb-system rollout status deploy/sb-guard --timeout=15s && "+
 			"k3s kubectl -n cnpg-system rollout status deploy/cloudnative-pg --timeout=15s", nil)
+		return err == nil, nil
+	}); err != nil {
+		return err
+	}
+	// Push the image into the in-cluster registry for servers that join later.
+	push := strings.Replace(ref, RegistryPullHost, RegistryIP+":5000", 1)
+	t0, err := st.Target(0)
+	if err != nil {
+		return err
+	}
+	return poll(ctx, 3*time.Minute, 10*time.Second, func(ctx context.Context) (bool, error) {
+		_, err := t0.Run(ctx, "k3s ctr -n k8s.io images tag --force "+ref+" "+push+" >/dev/null && k3s ctr -n k8s.io images push --plain-http "+push+" >/dev/null", nil)
+		if err != nil {
+			p.Logf("[%s] pushing sb-control to the registry: %v (retrying)", st.RunID, err)
+		}
 		return err == nil, nil
 	})
 }

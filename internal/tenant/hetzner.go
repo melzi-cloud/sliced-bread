@@ -374,7 +374,8 @@ func (p *Provisioner) rotateToken(ctx context.Context, st *State) error {
 			return fmt.Errorf("%s not Ready after token rotation: %w", name, err)
 		}
 	}
-	return nil
+	// The node guard joins replacement servers with this token.
+	return p.writeClusterInfo(ctx, st, newTok)
 }
 
 // waitK3s waits for SSH, cloud-init, and all nodes Ready.
