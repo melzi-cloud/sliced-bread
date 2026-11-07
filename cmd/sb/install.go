@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/melzi-cloud/sliced-bread/internal/apps"
 	"github.com/melzi-cloud/sliced-bread/internal/config"
 	"github.com/melzi-cloud/sliced-bread/internal/controlbin"
 	"github.com/melzi-cloud/sliced-bread/internal/labels"
@@ -183,7 +184,8 @@ func runInit(args []string) error {
 		return &exitErr{exitError, "Cloudflare token check failed: " + err.Error()}
 	}
 	for _, r := range existing {
-		if r.Name == "*."+*domain || r.Name == "api."+*domain || r.Name == "auth."+*domain {
+		h := apps.Hosts{Domain: *domain}
+		if r.Name == "*."+*domain || r.Name == h.API() || r.Name == h.Auth() {
 			return &exitErr{exitError, fmt.Sprintf("DNS record %s already exists; use another base domain or remove it", r.Name)}
 		}
 	}
