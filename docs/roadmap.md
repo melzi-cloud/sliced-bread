@@ -31,7 +31,7 @@ M6 is required before any real data, including our own Vaultwarden, moves onto t
 6. Without a session, every `wall` app returns the login wall. Only declared public paths bypass it. A port scan of the tenant shows only 80/443.
 7. A compromised app cannot read the session cookie or reach another app's database.
 8. Starting from "add analytics to this app", an agent ends with a working Umami receiving events.
-9. Restore tests run nightly and a failure raises an alert. (Restore tests run after every backup and failures show in `sb backups` and `sb status`; alerts are open.)
+9. Restore tests run nightly and a failure raises an alert. (Restore tests run after every backup and failures show in `sb backups` and `sb status`; failures open an alert on the dashboard, in `sb alerts` and on the configured webhook, and clear after a passing test.) **Done 2026-11-06.**
 
 ## Later
 

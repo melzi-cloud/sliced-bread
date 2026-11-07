@@ -651,3 +651,35 @@ func (s *Server) obsoleteRestoreApprovals(app string) {
 		}
 	}
 }
+
+// backupShort is the dashboard's one-word backup state.
+func backupShort(a *apps.App, now time.Time) string {
+	if !a.HasData() {
+		return "no data"
+	}
+	b := a.Backup
+	switch {
+	case b == nil || (b.LastBackup == nil && b.Running == nil):
+		return "none yet"
+	case b.Running != nil:
+		return b.Running.Kind + " running"
+	case b.LastBackup != nil && b.LastBackup.Phase == "failed":
+		return "FAILED"
+	case b.LastTest != nil && b.LastTest.Phase == "failed":
+		return "restore test FAILED"
+	}
+	if len(b.History) > 0 {
+		tested := "test pending"
+		if b.LastTest != nil && b.LastTest.Phase == "succeeded" && b.LastTest.Snapshot == b.History[0].Snapshot {
+			tested = "tested"
+		}
+		if t, err := time.Parse(time.RFC3339, b.History[0].StartedAt); err == nil {
+			ago := now.Sub(t)
+			if ago < time.Hour {
+				return "ok, " + tested + ", under 1h ago"
+			}
+			return fmt.Sprintf("ok, %s, %dh ago", tested, int(ago.Hours()))
+		}
+	}
+	return "ok"
+}

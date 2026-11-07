@@ -53,13 +53,14 @@ Backup storage is billed by your S3 provider. Restic deduplicates and compresses
 - **Deploy anything:** a catalog template (Vaultwarden, Umami), any container image, a public git repo, or a local directory such as a Lovable export, built in the cluster with Railpack or its Dockerfile.
 - **Private by default:** every app sits behind a login wall unless you say otherwise. Apps with their own clients (Vaultwarden) opt out. Session cookies are host-only and never reach apps.
 - **Backups that are proven:** daily restic backups of volumes and Postgres to your bucket, each followed by a restore test into a scratch namespace: restic verifies every restored file's content, the file count must match, required files must be present (Vaultwarden's database), and a database dump must load into a fresh Postgres with the same tables. `sb restore` replaces an app's data with a snapshot.
+- **Tells you when something breaks:** failed backups or restore tests, apps that stay down, certificates that don't renew and servers that disappear show on the dashboard and in `sb alerts`, and can be posted to a webhook (Slack, Discord, ntfy or JSON) when they open and when they clear.
 - **Agent-friendly:** a CLI with JSON output and documented exit codes, a skill file, and human approvals for anything that widens exposure, deletes or restores.
 - **Your account, your keys:** certificates are issued and kept inside your cluster, and traffic never passes through us. `sb export` writes every app as plain Kubernetes manifests.
 
 ## Known gaps
 
 - No automatic OS patching, node replacement or rollback of bad image updates yet.
-- No alerting: a failed backup or restore test shows in `sb backups` and `sb status`, but nothing notifies you.
+- Alerts go to the dashboard, `sb alerts` and one webhook (JSON, Slack, Discord or ntfy). No email yet.
 - Apps run as root inside their containers (capabilities reduced, privilege escalation off).
 - The in-cluster image registry has no login. App pods cannot reach it (network policy) and apps run images by digest, but build pods can push to it.
 - One Postgres instance per app (no replica). On `--size 3` it moves with its volume when a server fails; on `--size 1` it is down with the server.

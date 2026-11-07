@@ -152,6 +152,7 @@ var resources = map[string]resource{
 	"networking.k8s.io/v1/NetworkPolicy": {"networking.k8s.io", "v1", "networkpolicies", true},
 	"traefik.io/v1alpha1/Middleware":     {"traefik.io", "v1alpha1", "middlewares", true},
 	"postgresql.cnpg.io/v1/Cluster":      {"postgresql.cnpg.io", "v1", "clusters", true},
+	"cert-manager.io/v1/Certificate":     {"cert-manager.io", "v1", "certificates", true},
 	"slicedbread.dev/v1alpha1/App":       {"slicedbread.dev", "v1alpha1", "apps", false},
 	"slicedbread.dev/v1alpha1/Approval":  {"slicedbread.dev", "v1alpha1", "approvals", false},
 	"apiextensions.k8s.io/v1/CustomResourceDefinition": {"apiextensions.k8s.io", "v1", "customresourcedefinitions", false},

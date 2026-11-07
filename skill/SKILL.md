@@ -174,6 +174,14 @@ What a restore test checks, so you can report it accurately: restic restores the
 - If backups are not configured, tell the user: an admin runs `sb backups configure` (or passed backup flags to `sb init`). Until then nothing is backed up.
 - `sb export <dir>` (admin token) writes every app as plain Kubernetes manifests.
 
+## Alerts
+
+```sh
+sb alerts        # open alerts: failed backups or restore tests, apps down for 15 minutes, certificates, servers
+```
+
+The dashboard at `https://auth.<tenant-domain>/` shows the same list. Each alert has a `next:` hint with the command to investigate. Check `sb alerts` at the start of operational work and after finishing a task; report open alerts to the user. Admins can send alerts to a webhook with `sb alerts configure --webhook <url> --format slack|discord|ntfy|json` and check it with `sb alerts test`.
+
 ## Installing
 
 Only when the user asks for a new install. It runs from the user's machine against their own Hetzner account and Cloudflare domain:

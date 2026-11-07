@@ -68,6 +68,8 @@ type Server struct {
 	registryPolicyKey string
 	registryPolicyAt  time.Time
 	registryGCAt      time.Time
+	alertsAt          time.Time
+	alertsCache       []Alert
 }
 
 // New creates a server and loads or bootstraps auth state.

@@ -40,7 +40,7 @@ What SlicedBread protects against, what it does not, and where the trust boundar
 - **Denial of service.** No rate limiting beyond what Traefik and Hetzner provide.
 - **Losing the whole Hetzner location or account.** Backups survive if the bucket is elsewhere, but restoring into a new install is a manual process today.
 - **Unpatched OS and images.** Automatic patching and image updates are not built yet.
-- **Alerting.** Failures are visible in `sb backups` and `sb status`, but nobody is notified.
+- **Alerting reaches you only through the dashboard, `sb alerts` and a webhook you configure.** If the whole install is down, nothing inside it can send an alert; an outside uptime check is still needed for that.
 
 ## Reporting
 

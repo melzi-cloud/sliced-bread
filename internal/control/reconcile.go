@@ -420,6 +420,9 @@ func (s *Server) tick(ctx context.Context) {
 		}
 		s.mu.Unlock()
 	}
+	if fresh, err := s.listApps(ctx); err == nil {
+		s.evaluateAlerts(ctx, fresh, bc)
+	}
 }
 
 // --- status ---
@@ -447,6 +450,7 @@ type AppStatus struct {
 	Database     string            `json:"database,omitempty"`
 	Notes        string            `json:"notes,omitempty"`
 	Backups      string            `json:"backups,omitempty"`
+	BackupShort  string            `json:"-"`
 }
 
 func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
@@ -472,6 +476,7 @@ func (s *Server) status(ctx context.Context, a *apps.App) AppStatus {
 		st.Storage = "persistent volumes (" + strings.Join(vols, ", ") + ") survive restarts and redeploys; deleting the app deletes them"
 		st.Backups = backupSummary(a)
 	}
+	st.BackupShort = backupShort(a, time.Now())
 	switch {
 	case a.Template != "":
 		st.Source = "template " + a.Template

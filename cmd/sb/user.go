@@ -86,6 +86,11 @@ Backups (apps with a volume or database; each backup is followed by a restore te
   sb backups password                 admin token: the backups' encryption password
   sb export <dir> [--include-secrets] admin token: every app as Kubernetes manifests
 
+Alerts (also on the dashboard at https://auth.<tenant-domain>/)
+  sb alerts                           open alerts: failed backups or restore tests, apps down, certificates, servers
+  sb alerts configure --webhook URL [--format json|slack|discord|ntfy]   admin token; --off to remove
+  sb alerts test                      admin token: send a test message to the webhook
+
 Approvals (privileged changes requested by agents)
   sb approvals [--app <app>] [--wait <id>] [--timeout 30m]   list (optionally one app), or block until a human decides
   sb approve <id> | sb deny <id>      humans only (admin token); agents cannot approve
@@ -316,6 +321,9 @@ func runUser(args []string) error {
 
 	if ok, err := c.runBackupCmd(cmd, fs, rest, jsonOut); ok {
 		return err
+	}
+	if cmd == "alerts" {
+		return c.runAlerts(fs, rest, jsonOut)
 	}
 
 	switch cmd {

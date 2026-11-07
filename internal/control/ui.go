@@ -16,6 +16,8 @@ body{font-family:system-ui,-apple-system,sans-serif;max-width:760px;margin:40px 
 h1{font-size:22px} table{border-collapse:collapse;width:100%} td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #eee;font-size:14px}
 input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:8px 14px;margin-right:6px;cursor:pointer}
 .err{color:#b00} .muted{color:#777;font-size:13px} code{background:#f4f4f4;padding:1px 4px}
+.alerts{margin:16px 0;padding:0;list-style:none} .alerts li{padding:8px 12px;margin:6px 0;border-left:4px solid #c62828;background:#fdecea;font-size:14px}
+.alerts li.warning{border-color:#ef6c00;background:#fff4e5} .ok{color:#2e7d32}
 </style></head><body>
 <h1>SlicedBread</h1>
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
@@ -42,9 +44,11 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 <td>{{if eq .State "pending"}}<form method="post" action="/approvals/{{.ID}}"><input type="hidden" name="csrf" value="{{$.CSRF}}">
 <button name="decision" value="approve">Approve</button><button name="decision" value="deny">Deny</button></form>{{end}}</td></tr>{{end}}</table>
 {{else}}
+{{if .Alerts}}<h2>Alerts</h2><ul class="alerts">{{range .Alerts}}<li class="{{.Severity}}"><b>{{.Title}}</b>{{if .Detail}}<br>{{.Detail}}{{end}}<br><span class="muted">since {{.Since}}{{if .Hint}} &middot; next: <code>{{.Hint}}</code>{{end}}</span></li>{{end}}</ul>
+{{else}}<p class="ok">No alerts.</p>{{end}}
 <h2>Apps</h2>
 {{if not .Apps}}<p>No apps yet. Ask your agent to deploy one, or run <code>sb deploy</code>.</p>{{end}}
-<table>{{range .Apps}}<tr><td><a href="{{.URL}}">{{.Name}}</a></td><td>{{.State}}</td><td>{{.Access}}</td><td class="muted">{{.Source}}</td></tr>{{end}}</table>
+<table>{{if .Apps}}<tr><th>App</th><th>State</th><th>Access</th><th>Backups</th><th>Source</th></tr>{{end}}{{range .Apps}}<tr><td><a href="{{.URL}}">{{.Name}}</a></td><td>{{.State}}</td><td>{{.Access}}</td><td>{{.BackupShort}}</td><td class="muted">{{.Source}}</td></tr>{{end}}</table>
 {{if .Pending}}<p><a href="/approvals">{{.Pending}} approval(s) waiting</a></p>{{end}}
 {{end}}{{end}}
 </body></html>`))
@@ -55,6 +59,7 @@ type pageData struct {
 	Apps                         []AppStatus
 	Approvals                    []*Approval
 	Pending                      int
+	Alerts                       []Alert
 }
 
 func (s *Server) render(w http.ResponseWriter, d pageData) {
@@ -107,7 +112,8 @@ func (s *Server) uiMux() http.Handler {
 				pending++
 			}
 		}
-		s.render(w, pageData{Page: "apps", Email: email, Apps: sts, Pending: pending, CSRF: s.csrf(w, r)})
+		alerts := s.loadAlertState(r.Context()).openAlerts()
+		s.render(w, pageData{Page: "apps", Email: email, Apps: sts, Pending: pending, Alerts: alerts, CSRF: s.csrf(w, r)})
 	}))
 	m.HandleFunc("GET /device", s.requireSession(func(w http.ResponseWriter, r *http.Request, email string) {
 		code := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("code")))
