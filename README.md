@@ -51,6 +51,7 @@ Backup storage is billed by your S3 provider. Restic deduplicates and compresses
 ## What it does today
 
 - **Deploy anything:** a catalog template (Vaultwarden, Umami), any container image, a public git repo, or a local directory such as a Lovable export, built in the cluster with Railpack or its Dockerfile.
+- **Your team, your rules:** invite teammates as members or admins with `sb members invite`. Members get past the login wall; whether they can also approve risky changes is an admin setting (off by default).
 - **Private by default:** every app sits behind a login wall unless you say otherwise. Apps with their own clients (Vaultwarden) opt out. Session cookies are host-only and never reach apps.
 - **Backups that are proven:** daily restic backups of volumes and Postgres to your bucket, each followed by a restore test into a scratch namespace: restic verifies every restored file's content, the file count must match, required files must be present (Vaultwarden's database), and a database dump must load into a fresh Postgres with the same tables. `sb restore` replaces an app's data with a snapshot.
 - **Tells you when something breaks:** failed backups or restore tests, apps that stay down, certificates that don't renew and servers that disappear show on the dashboard and in `sb alerts`, and can be posted to a webhook (Slack, Discord, ntfy or JSON) when they open and when they clear.
@@ -64,7 +65,7 @@ Backup storage is billed by your S3 provider. Restic deduplicates and compresses
 - Apps run as root inside their containers (capabilities reduced, privilege escalation off).
 - The in-cluster image registry has no login. App pods cannot reach it (network policy) and apps run images by digest, but build pods can push to it.
 - One Postgres instance per app (no replica). On `--size 3` it moves with its volume when a server fails; on `--size 1` it is down with the server.
-- Login is email and password for one admin account. No GitHub login or team members yet, so "private" means only you.
+- Login is email and password. Teammates join through invite links you send yourself (no email sending, no GitHub sign-in yet).
 - A restore test checks that Vaultwarden's SQLite file is present, not its internal integrity.
 - Hetzner and Cloudflare only.
 

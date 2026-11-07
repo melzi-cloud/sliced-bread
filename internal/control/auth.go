@@ -44,18 +44,22 @@ const (
 type user struct {
 	Email string `json:"email"`
 	Hash  string `json:"hash"`
+	Role  string `json:"role,omitempty"` // admin or member; empty means admin (older state)
 }
 
 type token struct {
 	Name   string `json:"name"`
 	Scope  string `json:"scope"`
 	SHA256 string `json:"sha256"`
+	Owner  string `json:"owner,omitempty"` // email of the human who approved it
 }
 
 type authState struct {
-	SessionKey string  `json:"sessionKey"`
-	Users      []user  `json:"users"`
-	Tokens     []token `json:"tokens"`
+	SessionKey        string   `json:"sessionKey"`
+	Users             []user   `json:"users"`
+	Tokens            []token  `json:"tokens"`
+	Invites           []invite `json:"invites,omitempty"`
+	MembersCanApprove bool     `json:"membersCanApprove,omitempty"`
 }
 
 // Auth holds users, API tokens and the session signing key.
@@ -70,17 +74,12 @@ type Auth struct {
 }
 
 // MintToken creates and persists a new API token, returning its plaintext once.
-func (a *Auth) MintToken(ctx context.Context, name, scope string) (string, error) {
+func (a *Auth) MintToken(ctx context.Context, name, scope, owner string) (string, error) {
 	tok := "sbt_" + randString(24)
-	a.mu.Lock()
-	a.st.Tokens = append(a.st.Tokens, token{Name: name, Scope: scope, SHA256: sha(tok)})
-	a.mu.Unlock()
-	if a.kube == nil {
-		return tok, nil
-	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return tok, a.save(ctx, a.kube, a.ns)
+	return tok, a.mutate(ctx, func(st *authState) error {
+		st.Tokens = append(st.Tokens, token{Name: name, Scope: scope, SHA256: sha(tok), Owner: owner})
+		return nil
+	})
 }
 
 func randString(n int) string {
@@ -117,7 +116,7 @@ func LoadAuth(ctx context.Context, k *kube.Client, ns, domain, adminEmail string
 		}
 		a.st = authState{
 			SessionKey: randString(32),
-			Users:      []user{{Email: adminEmail, Hash: string(hash)}},
+			Users:      []user{{Email: adminEmail, Hash: string(hash), Role: RoleAdmin}},
 			Tokens:     []token{{Name: "admin", Scope: ScopeAdmin, SHA256: sha(adminTok)}, {Name: "agent", Scope: ScopeAgent, SHA256: sha(agentTok)}},
 		}
 		if err := a.save(ctx, k, ns); err != nil {
@@ -302,7 +301,7 @@ func (a *Auth) findSession(r *http.Request, name, host, kind string) (email, val
 		if c.Name != name {
 			continue
 		}
-		if e, err := a.ParseSession(c.Value, host, kind, now); err == nil {
+		if e, err := a.ParseSession(c.Value, host, kind, now); err == nil && a.hasUser(e) {
 			return e, c.Value, true
 		}
 	}

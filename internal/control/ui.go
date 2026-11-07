@@ -1,6 +1,7 @@
 package control
 
 import (
+	"errors"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -27,8 +28,16 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 <label>Email<input name="email" type="email" autocomplete="username" required></label>
 <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
 <button type="submit">Sign in</button></form>
+{{else if eq .Page "invite"}}
+{{if .Done}}<p>{{.Done}}</p>{{else}}
+<h2>Join {{.Domain}}</h2>
+<p>You were invited as <b>{{.Email}}</b> ({{.Role}}). Choose a password (at least 12 characters).</p>
+<form method="post" action="/invite"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="token" value="{{.Code}}">
+<label>Password<input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+<label>Repeat password<input name="password2" type="password" autocomplete="new-password" minlength="12" required></label>
+<button type="submit">Join</button></form>{{end}}
 {{else}}
-<p class="muted">Signed in as {{.Email}} &middot; <a href="/logout">sign out</a> &middot; <a href="/">apps</a> &middot; <a href="/approvals">approvals</a></p>
+<p class="muted">Signed in as {{.Email}} ({{.Role}}) &middot; <a href="/logout">sign out</a> &middot; <a href="/">apps</a> &middot; <a href="/approvals">approvals</a> &middot; <a href="/members">members</a></p>
 {{if eq .Page "device"}}
 <h2>Connect a CLI</h2>
 {{if .Done}}<p>{{.Done}}</p>{{else}}
@@ -41,8 +50,27 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 <h2>Approvals</h2>
 {{if not .Approvals}}<p>No approvals.</p>{{end}}
 <table>{{range .Approvals}}<tr><td><code>{{.ID}}</code></td><td>{{.Summary}}<br><span class="muted">{{.RequestedAt}} &middot; {{.State}}{{if .Result}} &middot; {{.Result}}{{end}}</span></td>
-<td>{{if eq .State "pending"}}<form method="post" action="/approvals/{{.ID}}"><input type="hidden" name="csrf" value="{{$.CSRF}}">
-<button name="decision" value="approve">Approve</button><button name="decision" value="deny">Deny</button></form>{{end}}</td></tr>{{end}}</table>
+<td>{{if eq .State "pending"}}{{if $.CanApprove}}<form method="post" action="/approvals/{{.ID}}"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+<button name="decision" value="approve">Approve</button><button name="decision" value="deny">Deny</button></form>{{else}}<span class="muted">an admin approves</span>{{end}}{{end}}</td></tr>{{end}}</table>
+{{if not .CanApprove}}<p class="muted">Members cannot approve on this install. An admin can change that on the Members page.</p>{{end}}
+{{else if eq .Page "members"}}
+<h2>Members</h2>
+{{if .Done}}<p>{{.Done}}</p>{{end}}
+<table>{{range .Members}}<tr><td>{{.Email}}</td><td>{{.Role}}</td>
+<td>{{if $.IsAdmin}}<form method="post" action="/members/{{.Email}}"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+{{if eq .Role "admin"}}<button name="action" value="member">Make member</button>{{else}}<button name="action" value="admin">Make admin</button>{{end}}<button name="action" value="remove">Remove</button></form>{{end}}</td></tr>{{end}}
+{{range .Invites}}<tr><td>{{.Email}}</td><td class="muted">invited as {{.Role}}, until {{.Expires}}</td><td>{{if $.IsAdmin}}<form method="post" action="/members/{{.Email}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button name="action" value="remove">Revoke</button></form>{{end}}</td></tr>{{end}}</table>
+<p>Members can approve risky changes (making apps public, opening signups, deletes, restores): <b>{{if .MembersCanApprove}}yes{{else}}no, only admins{{end}}</b></p>
+{{if .IsAdmin}}
+<form method="post" action="/members/settings"><input type="hidden" name="csrf" value="{{.CSRF}}">
+{{if .MembersCanApprove}}<button name="membersCanApprove" value="false">Only admins approve</button>{{else}}<button name="membersCanApprove" value="true">Let members approve</button>{{end}}</form>
+<h2>Invite</h2>
+<form method="post" action="/members/invite"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>Email<input name="email" type="email" required></label>
+<label><input type="radio" name="role" value="member" checked style="width:auto"> member</label>
+<label><input type="radio" name="role" value="admin" style="width:auto"> admin</label>
+<button type="submit">Create invite link</button></form>
+{{end}}
 {{else}}
 {{if .Alerts}}<h2>Alerts</h2><ul class="alerts">{{range .Alerts}}<li class="{{.Severity}}"><b>{{.Title}}</b>{{if .Detail}}<br>{{.Detail}}{{end}}<br><span class="muted">since {{.Since}}{{if .Hint}} &middot; next: <code>{{.Hint}}</code>{{end}}</span></li>{{end}}</ul>
 {{else}}<p class="ok">No alerts.</p>{{end}}
@@ -60,9 +88,20 @@ type pageData struct {
 	Approvals                    []*Approval
 	Pending                      int
 	Alerts                       []Alert
+	Role, Domain                 string
+	CanApprove, IsAdmin          bool
+	MembersCanApprove            bool
+	Members                      []Member
+	Invites                      []PendingInvite
 }
 
 func (s *Server) render(w http.ResponseWriter, d pageData) {
+	if d.Email != "" && d.Page != "invite" {
+		d.Role = s.auth.Role(d.Email)
+		d.CanApprove = s.auth.CanApprove(d.Email)
+		d.IsAdmin = d.Role == RoleAdmin
+	}
+	d.Domain = s.cfg.Domain
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
@@ -149,6 +188,11 @@ func (s *Server) uiMux() http.Handler {
 			http.Error(w, "form expired, go back and retry", http.StatusForbidden)
 			return
 		}
+		if !s.auth.CanApprove(email) {
+			s.render(w, pageData{Page: "approvals", Email: email, CSRF: s.csrf(w, r),
+				Error: "Only admins can approve on this install. An admin can let members approve on the Members page."})
+			return
+		}
 		if _, err := s.decide(r.Context(), r.PathValue("id"), r.PostFormValue("decision")); err != nil {
 			aps, _ := s.listApprovals(r.Context())
 			s.render(w, pageData{Page: "approvals", Email: email, Approvals: aps, CSRF: s.csrf(w, r), Error: err.Error()})
@@ -156,7 +200,104 @@ func (s *Server) uiMux() http.Handler {
 		}
 		http.Redirect(w, r, "/approvals", http.StatusSeeOther)
 	}))
+	m.HandleFunc("GET /members", s.requireSession(func(w http.ResponseWriter, r *http.Request, email string) {
+		s.renderMembers(w, r, email, "", "")
+	}))
+	m.HandleFunc("POST /members/invite", s.requireSession(func(w http.ResponseWriter, r *http.Request, email string) {
+		if !s.checkCSRF(r) || s.auth.Role(email) != RoleAdmin {
+			s.renderMembers(w, r, email, "", "Only admins can invite.")
+			return
+		}
+		tok, err := s.auth.Invite(r.Context(), r.PostFormValue("email"), r.PostFormValue("role"), time.Now())
+		if err != nil {
+			s.renderMembers(w, r, email, "", err.Error())
+			return
+		}
+		s.renderMembers(w, r, email, "Invite link (send it yourself, it works once for 7 days): "+s.inviteURL(tok), "")
+	}))
+	m.HandleFunc("POST /members/settings", s.requireSession(func(w http.ResponseWriter, r *http.Request, email string) {
+		if !s.checkCSRF(r) || s.auth.Role(email) != RoleAdmin {
+			s.renderMembers(w, r, email, "", "Only admins can change this.")
+			return
+		}
+		if err := s.auth.SetMembersCanApprove(r.Context(), r.PostFormValue("membersCanApprove") == "true"); err != nil {
+			s.renderMembers(w, r, email, "", err.Error())
+			return
+		}
+		http.Redirect(w, r, "/members", http.StatusSeeOther)
+	}))
+	m.HandleFunc("POST /members/{member}", s.requireSession(func(w http.ResponseWriter, r *http.Request, email string) {
+		if !s.checkCSRF(r) || s.auth.Role(email) != RoleAdmin {
+			s.renderMembers(w, r, email, "", "Only admins can change members.")
+			return
+		}
+		var err error
+		switch action := r.PostFormValue("action"); action {
+		case "remove":
+			_, err = s.auth.RemoveMember(r.Context(), r.PathValue("member"))
+		case RoleAdmin, RoleMember:
+			err = s.auth.SetRole(r.Context(), r.PathValue("member"), action)
+		default:
+			err = errors.New("unknown action")
+		}
+		if err != nil {
+			s.renderMembers(w, r, email, "", err.Error())
+			return
+		}
+		http.Redirect(w, r, "/members", http.StatusSeeOther)
+	}))
+	m.HandleFunc("GET "+invitePath, func(w http.ResponseWriter, r *http.Request) {
+		tok := r.URL.Query().Get("token")
+		invited, ok := s.auth.InviteEmail(tok, time.Now())
+		if !ok {
+			s.render(w, pageData{Page: "login", Error: "This invite link is not valid (expired, used or revoked). Ask an admin for a new one.", CSRF: s.csrf(w, r)})
+			return
+		}
+		s.render(w, pageData{Page: "invite", Email: invited, Role: s.inviteRole(tok), Code: tok, CSRF: s.csrf(w, r)})
+	})
+	m.HandleFunc("POST "+invitePath, func(w http.ResponseWriter, r *http.Request) {
+		tok := r.PostFormValue("token")
+		invited, ok := s.auth.InviteEmail(tok, time.Now())
+		d := pageData{Page: "invite", Email: invited, Role: s.inviteRole(tok), Code: tok, CSRF: s.csrf(w, r)}
+		switch {
+		case !s.checkCSRF(r):
+			d.Error = "Form expired, try again."
+		case !ok:
+			d.Page, d.Error = "login", "This invite link is not valid (expired, used or revoked)."
+		case r.PostFormValue("password") != r.PostFormValue("password2"):
+			d.Error = "The passwords do not match."
+		}
+		if d.Error != "" {
+			s.render(w, d)
+			return
+		}
+		joined, err := s.auth.AcceptInvite(r.Context(), tok, r.PostFormValue("password"), time.Now())
+		if err != nil {
+			d.Error = err.Error()
+			s.render(w, d)
+			return
+		}
+		s.setCookie(w, SessionCookie, s.auth.NewSession(joined, requestHost(r), kindAuth, sessionTTL, time.Now()), int(sessionTTL.Seconds()))
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	})
 	return m
+}
+
+func (s *Server) renderMembers(w http.ResponseWriter, r *http.Request, email, done, errMsg string) {
+	ms, inv, can := s.auth.Members(time.Now())
+	s.render(w, pageData{Page: "members", Email: email, Members: ms, Invites: inv, MembersCanApprove: can, CSRF: s.csrf(w, r), Done: done, Error: errMsg})
+}
+
+func (s *Server) inviteRole(tok string) string {
+	s.auth.mu.RLock()
+	defer s.auth.mu.RUnlock()
+	sum := sha(tok)
+	for _, i := range s.auth.st.Invites {
+		if i.SHA256 == sum {
+			return i.Role
+		}
+	}
+	return ""
 }
 
 // afterLogin returns where to send a signed-in browser: an app host gets an exchange link.

@@ -102,7 +102,7 @@ func (s *Server) approveDevice(ctx context.Context, code, approver string, allow
 		s.devices.mu.Unlock()
 		return nil
 	}
-	tok, err := s.auth.MintToken(ctx, "cli "+code+" approved by "+approver, ScopeAgent)
+	tok, err := s.auth.MintToken(ctx, "cli "+code+" approved by "+approver, ScopeAgent, approver)
 	if err != nil {
 		return err
 	}

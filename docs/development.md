@@ -92,7 +92,7 @@ Language: Go. Pinned versions live in `internal/config` (k3s, cert-manager, hclo
 2. Done: provisioner, reaper, L2 smoke test.
 3. Done: prototype platform (`make prototype-up`, `make control-push`): sb-control, login wall, approvals, builds, uploads, templates, CLI, skill file, browser login.
 4. Done: agent tests. Subagents given only `skill/SKILL.md` and the CLI deployed a Lovable export, added Umami analytics and set up Vaultwarden. Their reports drove two rounds of fixes.
-5. Next: backups and restore tests (M6), node replacement, members and GitHub login, automatic rollback, an automated template verification workflow, and turning the agent tests into a repeatable suite.
+5. Next: backups and restore tests (M6), node replacement, automatic rollback, an automated template verification workflow, and turning the agent tests into a repeatable suite.
 
 ## Agent tests
 

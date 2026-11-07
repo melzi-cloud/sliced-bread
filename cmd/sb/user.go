@@ -91,6 +91,13 @@ Alerts (also on the dashboard at https://auth.<tenant-domain>/)
   sb alerts configure --webhook URL [--format json|slack|discord|ntfy]   admin token; --off to remove
   sb alerts test                      admin token: send a test message to the webhook
 
+Members (people who get past the login wall)
+  sb members                          members, invites, whether members can approve
+  sb members invite <email> [--admin] admin token: one-time invite link (you send it)
+  sb members remove <email>           admin token: remove a member or revoke an invite
+  sb members role <email> admin|member
+  sb members settings --members-can-approve true|false   admin token
+
 Approvals (privileged changes requested by agents)
   sb approvals [--app <app>] [--wait <id>] [--timeout 30m]   list (optionally one app), or block until a human decides
   sb approve <id> | sb deny <id>      humans only (admin token); agents cannot approve
@@ -324,6 +331,9 @@ func runUser(args []string) error {
 	}
 	if cmd == "alerts" {
 		return c.runAlerts(fs, rest, jsonOut)
+	}
+	if cmd == "members" {
+		return c.runMembers(fs, rest, jsonOut)
 	}
 
 	switch cmd {

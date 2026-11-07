@@ -129,7 +129,7 @@ What is built today, and where it differs from the target design above:
 | Area | Prototype |
 |---|---|
 | Control plane | `sb-control` inside each tenant (D-014). No central control plane yet. |
-| Login wall | Email and password accounts, forward-auth with cookie stripping (D-015). GitHub login next. |
+| Login wall | Email and password accounts with admin and member roles and invite links (D-024), forward-auth with cookie stripping (D-015). GitHub sign-in deferred. |
 | Agent safety | Agent and admin tokens, approvals for widening exposure and deletes (D-016). |
 | Sources | Templates (Vaultwarden, Umami), container images, public git repos, uploaded directories (D-017, D-018). |
 | Databases | CloudNativePG, one instance per app. No backups yet. |

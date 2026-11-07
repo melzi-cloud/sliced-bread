@@ -5,7 +5,7 @@ description: Deploy and operate apps (off-the-shelf software, container images, 
 
 # SlicedBread
 
-SlicedBread runs apps on the user's own private cluster. Every app gets `https://<app>.<tenant-domain>` with a trusted certificate. Apps are **private by default**: a login wall in front of the app lets only signed-in users in. Today that is a single admin account (no team members yet), so say "only you" rather than "your team".
+SlicedBread runs apps on the user's own private cluster. Every app gets `https://<app>.<tenant-domain>` with a trusted certificate. Apps are **private by default**: a login wall in front of the app lets only signed-in members of the install in (`sb members` lists them). Admins invite people with `sb members invite <email>`; the invite link is sent by the user, not by SlicedBread.
 
 You operate it with the `sb` CLI. You never need kubectl, SSH or cloud consoles.
 
@@ -173,6 +173,14 @@ What a restore test checks, so you can report it accurately: restic restores the
 - Apps that keep SQLite files (Vaultwarden) are stopped for a few seconds during each backup. `sb status` then shows `paused`; it resumes by itself.
 - If backups are not configured, tell the user: an admin runs `sb backups configure` (or passed backup flags to `sb init`). Until then nothing is backed up.
 - `sb export <dir>` (admin token) writes every app as plain Kubernetes manifests.
+
+## Members
+
+```sh
+sb members                       # who gets past the login wall, and whether members can approve
+```
+
+Inviting, removing and changing roles needs an admin token, so with an agent token tell the user the command to run (`sb members invite <email> [--admin]`) or point them to the Members page on the dashboard. Approvals of your requests can come from any admin, or from members when an admin has allowed it.
 
 ## Alerts
 

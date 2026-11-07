@@ -71,6 +71,11 @@ func (s *Server) apiMux() http.Handler {
 	m.HandleFunc("POST /v1/apps/{name}/restore", s.apiRestore)
 	m.HandleFunc("GET /v1/export", s.apiExport)
 	m.HandleFunc("GET /v1/alerts", s.apiAlerts)
+	m.HandleFunc("GET /v1/members", s.apiMembers)
+	m.HandleFunc("POST /v1/members", s.apiInvite)
+	m.HandleFunc("DELETE /v1/members/{email}", s.apiRemoveMember)
+	m.HandleFunc("POST /v1/members/{email}/role", s.apiSetRole)
+	m.HandleFunc("PUT /v1/members/settings", s.apiMemberSettings)
 	m.HandleFunc("PUT /v1/alerts/webhook", s.apiAlertsWebhook)
 	m.HandleFunc("POST /v1/alerts/test", s.apiAlertsTest)
 	m.HandleFunc("GET /v1/approvals", s.apiListApprovals)
@@ -95,7 +100,7 @@ func (s *Server) apiMux() http.Handler {
 
 func (s *Server) apiWhoami(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"scope": scopeOf(r), "domain": s.cfg.Domain, "team": s.auth.Emails(),
+		"scope": scopeOf(r), "domain": s.cfg.Domain, "team": s.auth.Emails(), "membersCanApprove": s.auth.CanApproveSetting(),
 		"wallAdmits": "signed-in team members listed in team",
 		"dashboard":  "https://" + s.hosts().Auth(), "approvals": "https://" + s.hosts().Auth() + "/approvals",
 		"appUrlPattern": "https://<app>." + s.cfg.Domain,

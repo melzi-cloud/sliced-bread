@@ -16,7 +16,7 @@ import (
 func testServer() *Server {
 	return &Server{
 		cfg:  Config{Domain: "r1.test.slicedbread.dev", InternalHostname: "sb-control.sb-system.svc.cluster.local"},
-		auth: &Auth{key: []byte("k"), domain: "r1.test.slicedbread.dev"},
+		auth: &Auth{key: []byte("k"), domain: "r1.test.slicedbread.dev", st: authState{Users: []user{{Email: "me@x.dev", Role: RoleAdmin}}}},
 		logf: func(string, ...any) {},
 	}
 }
