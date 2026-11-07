@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -447,5 +448,33 @@ func TestSQLiteSummary(t *testing.T) {
 	want := "sqlite data/db.sqlite3: integrity ok, rows: ciphers 12, users 0; sqlite data/x.db: integrity ok, missing tables notes"
 	if got != want {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestBuildBundle(t *testing.T) {
+	good := fstest.MapFS{
+		"tube/template.yaml":       {Data: []byte(multiTemplate)},
+		"tube/files/config.yml":    {Data: []byte("x: ${component.companion.internal}\n")},
+		"README.md":                {Data: []byte("not a template")},
+		".github/workflows/ci.yml": {Data: []byte("on: push")},
+	}
+	b, err := BuildBundle(good, 7, time.Now(), "test")
+	if err != nil || len(b.Templates) != 1 || b.Templates[0].Name != "tube" || len(b.Templates[0].Images) != 3 {
+		t.Fatalf("%+v %v", b, err)
+	}
+	data, _ := json.Marshal(b)
+	if _, tm, _, err := LoadBundle(data); err != nil || tm["tube"] == nil || !tm["tube"].Trusted {
+		t.Fatalf("round trip: %v", err)
+	}
+	broken := fstest.MapFS{
+		"tube/template.yaml":    {Data: []byte(strings.Replace(multiTemplate, "@sha256:0000000000000000000000000000000000000000000000000000000000000001", "", 1))},
+		"tube/files/config.yml": {Data: []byte("x")},
+	}
+	if _, err := BuildBundle(broken, 7, time.Now(), "test"); err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("a template without a digest must fail the build: %v", err)
+	}
+	misnamed := fstest.MapFS{"other/template.yaml": good["tube/template.yaml"], "other/files/config.yml": good["tube/files/config.yml"]}
+	if _, err := BuildBundle(misnamed, 7, time.Now(), "test"); err == nil {
+		t.Fatal("directory and template name must match")
 	}
 }
