@@ -33,6 +33,7 @@ type Config struct {
 	InternalHostname string // Host header of in-cluster forward-auth calls
 	Listen           string
 	DataDir          string // persistent volume for uploads
+	SelfImage        string // sb-control's own image; action jobs use it to wait for the network
 }
 
 // ConfigFromEnv reads Config.
@@ -55,6 +56,7 @@ func ConfigFromEnv() Config {
 		InternalHostname: get("SB_INTERNAL_HOST", "sb-control.sb-system.svc.cluster.local"),
 		Listen:           get("SB_LISTEN", ":8080"),
 		DataDir:          get("SB_DATA_DIR", "/data"),
+		SelfImage:        os.Getenv("SB_SELF_IMAGE"),
 	}
 }
 
@@ -76,6 +78,8 @@ type Server struct {
 	elector           *lease.Elector
 	draining          atomic.Bool
 	imageCheckAt      time.Time
+	repoMu            sync.Mutex
+	repoReady         string // repository known to be initialised
 	sharedGCAt        time.Time
 }
 

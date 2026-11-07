@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -109,7 +110,9 @@ func (s *Server) actionJob(ctx context.Context, a *apps.App, act *apps.Action, i
 	node := ""
 	for _, v := range act.Volumes {
 		mounts = append(mounts, kube.Obj{"name": "vol-" + v, "mountPath": actionVolDir + "/" + v, "readOnly": true})
-		vols = append(vols, kube.Obj{"name": "vol-" + v, "persistentVolumeClaim": kube.Obj{"claimName": "data-" + v, "readOnly": true}})
+		// Read-only inside the container only: the CSI driver cannot publish a volume
+		// read-only on a node where the app has it mounted read-write ("Resource busy").
+		vols = append(vols, kube.Obj{"name": "vol-" + v, "persistentVolumeClaim": kube.Obj{"claimName": "data-" + v}})
 		if n := s.volumeNode(ctx, a, v); n != "" {
 			node = n
 		} else {
@@ -133,6 +136,19 @@ func (s *Server) actionJob(ctx context.Context, a *apps.App, act *apps.Action, i
 	}
 	if node != "" {
 		pod["nodeName"] = node
+	}
+	if s.cfg.SelfImage != "" {
+		// A new pod's network policy rules arrive a few seconds after it starts; until then
+		// connections to the app are refused. Wait until the app answers (at most 60 s).
+		pod["initContainers"] = []any{kube.Obj{
+			"name": "wait", "image": s.cfg.SelfImage, "imagePullPolicy": "IfNotPresent",
+			"env": []any{
+				kube.Obj{"name": "SB_MODE", "value": "wait"},
+				kube.Obj{"name": "SB_WAIT_ADDR", "value": fmt.Sprintf("%s.%s.svc.cluster.local:%d", apps.ServiceName(a, primary.Name), ns, primary.Port)},
+			},
+			"securityContext": kube.Obj{"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": kube.Obj{"drop": []any{"ALL"}}},
+			"resources":       kube.Obj{"requests": kube.Obj{"cpu": "10m", "memory": "16Mi"}, "limits": kube.Obj{"memory": "64Mi"}},
+		}}
 	}
 	deadline := int((act.TimeoutDuration() + actionStartSlack).Seconds())
 	return kube.Obj{
@@ -238,10 +254,7 @@ func (s *Server) actionOutcome(ctx context.Context, a *apps.App, jobName string)
 	}
 	lines := strings.Split(strings.TrimSpace(logs), "\n")
 	if bad {
-		msg := "action failed"
-		if l := strings.TrimSpace(lines[len(lines)-1]); l != "" {
-			msg = l
-		}
+		msg := errorLine(lines)
 		if strings.Contains(kube.Str(job, "status", "conditions"), "DeadlineExceeded") || deadlineExceeded(job) {
 			msg = "action timed out"
 		}
@@ -578,4 +591,38 @@ func (s *Server) setupStatus(a *apps.App) []SetupStatus {
 // enterURL is a link that passes the app's login wall, then opens path.
 func (s *Server) enterURL(app, path string) string {
 	return "https://" + s.hosts().App(app) + apps.EnterPath + "?to=" + url.QueryEscape(path)
+}
+
+var noiseLine = regexp.MustCompile(`^(Node\.js v\d|at |\^+$|[{}\]),]*$|node:internal|triggerUncaughtException)`)
+
+// errorLine picks the most telling line of a failed script's output: the last line that
+// names an error, or else the last line that is not a stack frame or runtime noise.
+func errorLine(lines []string) string {
+	tail := lines
+	if len(tail) > 40 {
+		tail = tail[len(tail)-40:]
+	}
+	var errs []string
+	last := ""
+	for _, l := range tail {
+		l = strings.TrimSpace(l)
+		if l == "" || noiseLine.MatchString(l) {
+			continue
+		}
+		last = l
+		if strings.Contains(l, "Error") || strings.Contains(l, "error") {
+			errs = append(errs, l)
+		}
+	}
+	if len(errs) > 0 {
+		// "[TypeError: fetch failed]" followed by "[cause]: Error: connect ECONNREFUSED": keep both.
+		if len(errs) > 1 {
+			return errs[len(errs)-2] + " " + errs[len(errs)-1]
+		}
+		return errs[0]
+	}
+	if last == "" {
+		return "action failed"
+	}
+	return last
 }

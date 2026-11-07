@@ -526,3 +526,29 @@ func (s *Server) apiRecreate(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 202, map[string]any{"recreated": done, "hint": "each app starts after its data is restored; follow with: sb backups (or sb wait <app>)"})
 }
+
+// ensureRepo initialises the restic repository once, before any backup job runs. When
+// several apps took their first backup together, each job ran `restic init` on the same
+// empty repository and the repository ended up with keys that do not match its config.
+func (s *Server) ensureRepo(ctx context.Context, c *BackupConfig) error {
+	s.repoMu.Lock()
+	defer s.repoMu.Unlock()
+	repo := c.Repository()
+	if s.repoReady == repo {
+		return nil
+	}
+	if _, err := s.prepareRepoNamespace(ctx); err != nil {
+		return err
+	}
+	script := `set -eu
+` + resticFn + `if r cat config >/dev/null 2>/tmp/err; then echo "SB_REPO exists"; exit 0; fi
+if grep -qi "wrong password\|ciphertext verification" /tmp/err; then echo "SB_ERROR the backup repository exists but the encryption password does not match it"; exit 1; fi
+r init >/dev/null 2>/tmp/err || { tail -2 /tmp/err; echo "SB_ERROR could not create the backup repository"; exit 1; }
+echo "SB_REPO created"
+`
+	if _, err := s.runJob(ctx, repoJob("repo-init-"+randID(6), script, nil), 3*time.Minute); err != nil {
+		return err
+	}
+	s.repoReady = repo
+	return nil
+}

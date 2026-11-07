@@ -351,6 +351,9 @@ func (s *Server) startBackupRun(ctx context.Context, a *apps.App, kind, trigger,
 	if c == nil {
 		return nil, errors.New("backups are not configured; run: sb backups configure")
 	}
+	if err := s.ensureRepo(ctx, c); err != nil {
+		return nil, err
+	}
 	if a.Backup == nil {
 		a.Backup = &apps.BackupState{}
 	}

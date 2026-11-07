@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/user"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -105,6 +106,9 @@ func LoadDev() (Dev, error) {
 		ACMEServer:          env("SB_ACME_SERVER", LetsEncryptStaging),
 		Owner:               env("SB_OWNER", defaultOwner()),
 		TTL:                 DefaultTTL,
+	}
+	if v := os.Getenv("SB_NODES"); v == "1" || v == "3" {
+		d.Nodes, _ = strconv.Atoi(v) // dev: SB_NODES=1 for a one-server prototype
 	}
 	if v := os.Getenv("SB_TTL"); v != "" {
 		ttl, err := time.ParseDuration(v)

@@ -144,6 +144,7 @@ spec:
             - {name: SB_DOMAIN, value: "{{.Domain}}"}
             - {name: SB_RAILPACK_VERSION, value: "` + RailpackVersion + `"}
             - {name: SB_REGISTRY_PULL, value: "` + RegistryPullHost + `"}
+            - {name: SB_SELF_IMAGE, value: "{{.ControlImage}}"}
           volumeMounts: [{name: data, mountPath: /data}]
           readinessProbe:
             httpGet: {path: /healthz, port: 8080}

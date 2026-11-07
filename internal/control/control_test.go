@@ -397,3 +397,24 @@ func TestEnterPassesWallThenOpensPath(t *testing.T) {
 		t.Fatalf("exchange must keep the enter query: %s", ex)
 	}
 }
+
+func TestErrorLine(t *testing.T) {
+	node := strings.Split(`node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+[TypeError: fetch failed] {
+  [cause]: Error: connect ECONNREFUSED 10.43.26.186:3000
+      at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2083:16) {
+    errno: -111,
+  }
+}
+
+Node.js v24.22.2`, "\n")
+	if got := errorLine(node); !strings.Contains(got, "fetch failed") || !strings.Contains(got, "ECONNREFUSED") {
+		t.Fatalf("got %q", got)
+	}
+	if got := errorLine([]string{"working", "umami login failed: HTTP 401"}); got != "umami login failed: HTTP 401" {
+		t.Fatalf("got %q", got)
+	}
+}
