@@ -57,9 +57,11 @@ func TestOSUpdates(t *testing.T) {
 		t.Fatal("SB_S3_ENDPOINT, SB_S3_BUCKET (dev.env) and SB_S3_ACCESS_KEY, SB_S3_SECRET_KEY (keychain) are needed")
 	}
 	root := repoRoot(t)
-	sb := filepath.Join(root, "bin", "sb")
-	if _, err := os.Stat(sb); err != nil {
-		t.Fatal("bin/sb missing: run make build")
+	sb, sbDev := filepath.Join(root, "bin", "sb"), filepath.Join(root, "bin", "sb-dev")
+	for _, b := range []string{sb, sbDev} {
+		if _, err := os.Stat(b); err != nil {
+			t.Fatalf("%s missing: run make build", b)
+		}
 	}
 	p := tenant.New(cfg, filepath.Join(root, tenant.StateRoot))
 	p.Logf = func(f string, a ...any) { t.Logf(f, a...) }
@@ -68,7 +70,7 @@ func TestOSUpdates(t *testing.T) {
 
 	runID, created := os.Getenv("SB_RUN"), false
 	if runID == "" {
-		cmd := exec.CommandContext(ctx, sb, "dev", "prototype", "up")
+		cmd := exec.CommandContext(ctx, sbDev, "prototype", "up")
 		cmd.Dir = root
 		cmd.Env = append(os.Environ(), "SB_TTL=4h")
 		var out bytes.Buffer
