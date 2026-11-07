@@ -69,6 +69,8 @@ func (s *Server) apiMux() http.Handler {
 	m.HandleFunc("POST /v1/apps/{name}/backup", s.apiStartBackup)
 	m.HandleFunc("POST /v1/apps/{name}/restore-test", s.apiStartRestoreTest)
 	m.HandleFunc("POST /v1/apps/{name}/restore", s.apiRestore)
+	m.HandleFunc("GET /v1/backups/repository", s.apiRepository)
+	m.HandleFunc("POST /v1/recreate", s.apiRecreate)
 	m.HandleFunc("GET /v1/export", s.apiExport)
 	m.HandleFunc("GET /v1/alerts", s.apiAlerts)
 	m.HandleFunc("GET /v1/members", s.apiMembers)

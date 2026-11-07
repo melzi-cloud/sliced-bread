@@ -201,14 +201,18 @@ func runEnv(a *apps.App, run *apps.BackupRun) []any {
 
 // waitDB: a new pod's IP reaches the network policy rules a few seconds after it starts,
 // so the first connection attempts can fail. Wait until Postgres answers.
-const waitDB = `i=0; until pg_isready -q -t 3 -d "$SB_DB_URI"; do i=$((i+1)); if [ $i -ge 40 ]; then echo "SB_ERROR database not reachable"; exit 1; fi; sleep 3; done
+const waitDB = `i=0; until pg_isready -q -t 3 -d "$SB_DB_URI"; do i=$((i+1)); if [ $i -ge "${SB_DB_WAIT_TRIES:-40}" ]; then echo "SB_ERROR database not reachable"; exit 1; fi; sleep 3; done
 `
 
 const countTablesSQL = `select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema') and table_type='BASE TABLE'`
 const countRowsSQL = `select coalesce(sum((xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', table_schema, table_name), false, true, '')))[1]::text::bigint),0) from information_schema.tables where table_schema not in ('pg_catalog','information_schema') and table_type='BASE TABLE'`
 
-func backupJob(a *apps.App, run *apps.BackupRun, nodeName string) kube.Obj {
+func backupJob(a *apps.App, run *apps.BackupRun, nodeName, uploadURL string) kube.Obj {
 	vols, mounts := dataVolumes(a)
+	// The app's spec and secret values (and its uploaded source) travel with every
+	// snapshot, so a backup can bring back a deleted app or a whole install.
+	vols = append(vols, kube.Obj{"name": "meta", "secret": kube.Obj{"secretName": backupMetaSecret}})
+	resticMounts := append(append([]any{}, mounts...), kube.Obj{"name": "meta", "mountPath": "/meta-src", "readOnly": true})
 	var inits []any
 	if a.Database {
 		dump := `set -eu
@@ -221,15 +225,17 @@ echo "dumped database: $(cat /sb/db/tables) tables, $(wc -c < /sb/db/db.dump) by
 	}
 	script := `set -eu
 ` + resticFn + `r cat config >/dev/null 2>&1 || r init >/dev/null 2>&1 || r cat config >/dev/null
-mkdir -p /sb/vol
+mkdir -p /sb/vol /sb/meta
+cp /meta-src/app.json /meta-src/env.json /sb/meta/
+if [ -n "$SB_UPLOAD_URL" ]; then wget -qO /sb/meta/source.tar.gz "$SB_UPLOAD_URL" || { echo "SB_ERROR could not fetch the app's source for the backup"; exit 1; }; fi
 echo "SB_FILES $(find /sb/vol -type f | wc -l)"
 if [ -f /sb/db/tables ]; then echo "SB_DB_TABLES $(cat /sb/db/tables)"; fi
 out=$(r backup --host slicedbread --tag "app=$SB_APP" --tag "run=$SB_RUN" --json /sb | grep '"message_type":"summary"')
 echo "SB_SNAPSHOT $(echo "$out" | sed -n 's/.*"snapshot_id":"\([0-9a-f]*\)".*/\1/p')"
 echo "SB_BYTES $(echo "$out" | sed -n 's/.*"total_bytes_processed":\([0-9]*\).*/\1/p')"
-r forget --host slicedbread --tag "app=$SB_APP" --keep-daily 14 --keep-weekly 8 --prune >/dev/null 2>&1 || echo "note: pruning old snapshots skipped (repository busy)"
+r forget --host slicedbread --tag "app=$SB_APP" --keep-last 10 --keep-daily 14 --keep-weekly 8 --prune >/dev/null 2>&1 || echo "note: pruning old snapshots skipped (repository busy)"
 `
-	main := container("restic", resticImage, script, runEnv(a, run), mounts, 0)
+	main := container("restic", resticImage, script, append(runEnv(a, run), kube.Obj{"name": "SB_UPLOAD_URL", "value": uploadURL}), resticMounts, 0)
 	main["envFrom"] = []any{envFromSecret()}
 	return jobSpec{name: "backup-" + a.Name + "-" + run.ID, ns: apps.Namespace(a.Name), app: a, run: run,
 		init: inits, main: main, volumes: vols, nodeName: nodeName}.obj()
@@ -305,7 +311,7 @@ chmod -R a+rX /restore
 ` + waitDB + `pg_restore --clean --if-exists --no-owner --no-acl -d "$SB_DB_URI" /restore/db/db.dump 2>/tmp/err || echo "note: pg_restore reported $(grep -c ERROR /tmp/err) errors"
 echo "SB_DB_TABLES $(psql "$SB_DB_URI" -Atc "` + countTablesSQL + `")"
 `
-		main = container("database", postgresImage, load, append(env, dbURIEnv()...), []any{kube.Obj{"name": "restore", "mountPath": "/restore"}}, 999)
+		main = container("database", postgresImage, load, append(append(env, dbURIEnv()...), kube.Obj{"name": "SB_DB_WAIT_TRIES", "value": "200"}), []any{kube.Obj{"name": "restore", "mountPath": "/restore"}}, 999)
 	} else {
 		main = container("database", checkImage, `echo "no database"`, env, nil, 65534)
 	}
@@ -380,7 +386,10 @@ func (s *Server) launch(ctx context.Context, c *BackupConfig, a *apps.App, run *
 				}
 			}
 		}
-		return s.kube.Apply(ctx, backupJob(a, run, node))
+		if err := s.writeBackupMeta(ctx, a); err != nil {
+			return err
+		}
+		return s.kube.Apply(ctx, backupJob(a, run, node, s.uploadURL(a)))
 	case "test":
 		if err := s.kube.Apply(ctx, kube.Obj{"apiVersion": "v1", "kind": "Namespace", "metadata": kube.Obj{"name": restoreTestNS,
 			"labels": kube.Obj{"pod-security.kubernetes.io/enforce": "baseline", apps.ManagedByLabel: "slicedbread"}}}); err != nil {

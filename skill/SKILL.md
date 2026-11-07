@@ -165,7 +165,11 @@ sb backups <app>           # plus the list of snapshots
 sb backup <app> --wait     # back up now (then the restore test runs); exit 1 if either fails
 sb restore-test <app> [--snapshot ID] --wait   # test any snapshot again without touching the app
 sb restore <app> [--snapshot ID] --wait   # replace the app's data with a snapshot (default: latest)
+sb backups --repository    # every app in the backup bucket, including deleted ones
+sb restore <app> --recreate [--snapshot ID] --wait   # bring back a deleted app: spec, secrets, source and data
 ```
+
+Each snapshot carries the app's spec, its secret values and, for apps deployed with `--dir`, the uploaded source, so a deleted app can come back from the bucket alone. With an agent token `--recreate` needs human approval (exit code 3). The recreated app starts only after its data is restored.
 
 What a restore test checks, so you can report it accurately: restic restores the snapshot into a scratch namespace and verifies every file's content against the backup; the number of restored files must match the backup; template-required files must exist and be non-empty (Vaultwarden: `db.sqlite3`; its SQLite integrity is not checked); a database dump must load into a fresh Postgres with the same number of tables (rows are counted and reported). The first backup of a new app runs once it is running and its template setup has finished (trigger `initial`).
 

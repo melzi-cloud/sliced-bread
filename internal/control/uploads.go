@@ -18,6 +18,8 @@ import (
 
 const maxUpload = 50 << 20
 
+func (s *Server) uploadDir() string { return filepath.Join(s.cfg.DataDir, "uploads") }
+
 func (s *Server) uploadPath(id string) string {
 	return filepath.Join(s.cfg.DataDir, "uploads", id+".tar.gz")
 }

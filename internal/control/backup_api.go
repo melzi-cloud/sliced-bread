@@ -38,7 +38,7 @@ func (s *Server) apiBackups(w http.ResponseWriter, r *http.Request) {
 	v := BackupsView{Configured: c != nil, Apps: []AppBackupStatus{}}
 	if c != nil {
 		v.Target = strings.TrimPrefix(c.Repository(), "s3:")
-		v.Schedule = "daily at " + twoDigit(c.Hour) + ":00 UTC, each backup followed by a restore test; keeps 14 daily and 8 weekly snapshots"
+		v.Schedule = "daily at " + twoDigit(c.Hour) + ":00 UTC, each backup followed by a restore test; keeps the last 10 snapshots plus 14 daily and 8 weekly"
 	} else {
 		v.Hint = "configure with: sb backups configure --endpoint https://... --bucket <bucket> (admin token)"
 	}

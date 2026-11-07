@@ -110,6 +110,10 @@ func (s *Server) Handler() http.Handler {
 					s.handleInternalUpload(w, r)
 					return
 				}
+				if strings.HasPrefix(r.URL.Path, "/internal/restore-source/") {
+					s.handleRestoreSource(w, r)
+					return
+				}
 				http.NotFound(w, r)
 			}
 		case host == s.hosts().API():
@@ -319,8 +323,9 @@ func (s *Server) executeApproval(ctx context.Context, ap *Approval) error {
 	// Refuse stale approvals: the app changed, was deleted, or was recreated since the request.
 	stale := ""
 	switch {
-	case ap.Kind == "create" && gerr == nil:
+	case (ap.Kind == "create" || ap.Kind == "recreate") && gerr == nil:
 		stale = "an app with this name exists now"
+	case ap.Kind == "recreate":
 	case ap.Kind != "create" && gerr != nil:
 		stale = "the app no longer exists"
 	case ap.Kind != "create" && cur.Generation != ap.BaseGen:
@@ -336,6 +341,8 @@ func (s *Server) executeApproval(ctx context.Context, ap *Approval) error {
 		err = s.deleteApp(ctx, ap.App)
 	case "restore":
 		_, err = s.startBackupRun(ctx, cur, "restore", "approved "+ap.ID, ap.Snapshot)
+	case "recreate":
+		_, err = s.recreateLocked(ctx, map[string]string{ap.App: ap.Snapshot})
 	case "create", "update":
 		if ap.Desired == nil {
 			return fmt.Errorf("approval has no desired state")

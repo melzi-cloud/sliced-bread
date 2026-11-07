@@ -24,7 +24,7 @@ M6 is required before any real data, including our own Vaultwarden, moves onto t
 ## Acceptance tests
 
 1. Hard-kill a node: every app is back within the recovery target with no data loss.
-2. Delete an app's namespace: one command restores it from backup. (Partly: `sb restore` replaces an existing app's data; recreating a deleted app from backup is open.)
+2. Delete an app: one command brings it back from backup (`sb restore <app> --recreate`). **Done 2026-11-06.**
 3. Corrupt a Postgres table: point-in-time recovery brings it back.
 4. Patch day: OS updates and reboots happen with no manual steps and no user-visible downtime.
 5. A bad image update rolls back automatically.

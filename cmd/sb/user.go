@@ -82,6 +82,9 @@ Backups (apps with a volume or database; each backup is followed by a restore te
   sb restore-test <app> [--snapshot ID] [--wait]   restore a snapshot into a scratch namespace and check it
   sb restore <app> [--snapshot ID] [--wait]        replace the app's data with a snapshot (latest by default);
                                                    stops the app meanwhile; agents need human approval
+  sb backups --repository             every app in the backup repository, including deleted ones
+  sb restore <app> --recreate [--snapshot ID] [--wait]   bring back a deleted app from its backup
+  sb restore --all [--wait]           admin token: recreate every app in the repository (new install)
   sb backups configure --endpoint https://... --bucket B [--region auto] [--hour 3]   admin token; keys from env
   sb backups password                 admin token: the backups' encryption password
   sb export <dir> [--include-secrets] admin token: every app as Kubernetes manifests

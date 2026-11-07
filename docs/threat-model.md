@@ -8,6 +8,7 @@ What SlicedBread protects against, what it does not, and where the trust boundar
 |---|---|
 | App data | Hetzner volumes and Postgres in the install's cluster; backups in the user's S3 bucket |
 | Hetzner and Cloudflare tokens | Secrets in the cluster (`sb-system/sb-provider`, `kube-system/hcloud`, `cert-manager/cloudflare-api-token`) |
+| App secret values in backups | Every snapshot carries the app's spec and secret values (and uploaded source), so it can recreate the app; encrypted by restic like the data |
 | Backup keys and encryption password | Secret `sb-system/sb-backup`, copied as `sb-backup-env` into namespaces that run backup jobs; the password is also shown once to the admin |
 | TLS private keys | Secrets in the cluster; never leave it |
 | Admin and agent API tokens | The user's machine (`~/.config/slicedbread`); hashes in `sb-system/sb-auth` |

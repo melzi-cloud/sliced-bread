@@ -15,7 +15,7 @@ func js(v any) string { b, _ := json.Marshal(v); return string(b) }
 func TestBackupJobs(t *testing.T) {
 	a := &apps.App{Name: "vault", Volumes: []apps.Volume{{Name: "data", Path: "/data"}}, BackupRequire: []string{"data/db.sqlite3"}}
 	run := &apps.BackupRun{ID: "r1", Kind: "backup"}
-	j := js(backupJob(a, run, "node-2"))
+	j := js(backupJob(a, run, "node-2", ""))
 	for _, want := range []string{`"claimName":"data-data"`, `"mountPath":"/sb/vol/data"`, `"nodeName":"node-2"`, `"name":"sb-backup-env"`, resticImage, `"namespace":"app-vault"`} {
 		if !strings.Contains(j, want) {
 			t.Errorf("backup job missing %s", want)
@@ -25,7 +25,7 @@ func TestBackupJobs(t *testing.T) {
 		t.Error("no database: no dump container")
 	}
 	a.Database = true
-	j = js(backupJob(a, run, ""))
+	j = js(backupJob(a, run, "", ""))
 	if !strings.Contains(j, `"name":"dump"`) || !strings.Contains(j, `"key":"uri"`) || !strings.Contains(j, `"runAsUser":999`) {
 		t.Error("database backup needs a non-root pg_dump with the app's credentials")
 	}
