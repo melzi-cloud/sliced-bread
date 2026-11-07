@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	Duration = 15 * time.Second
-	renew    = 4 * time.Second
+	Duration = 10 * time.Second
+	renew    = 3 * time.Second
 )
 
 // Elector holds or waits for one Lease.

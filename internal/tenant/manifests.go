@@ -33,6 +33,14 @@ spec:
         requiredDuringSchedulingIgnoredDuringExecution:
           - topologyKey: kubernetes.io/hostname
             labelSelector: {matchLabels: {app.kubernetes.io/name: traefik}}
+    # Send traffic to each Service's cluster IP and let kube-proxy pick a ready pod.
+    # Traefik's own endpoint watch can be stuck on a dead server's API server for up to a
+    # minute after a server loss; kube-proxy reads from the API server on its own server.
+    providers:
+      kubernetesIngress:
+        nativeLBByDefault: true
+      kubernetesCRD:
+        nativeLBByDefault: true
     service:
       type: NodePort
     ports:

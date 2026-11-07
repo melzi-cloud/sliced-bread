@@ -28,7 +28,7 @@ import (
 const (
 	ns             = "sb-system"
 	stateConfigMap = "sb-node-repair"
-	tick           = 10 * time.Second
+	tick           = 5 * time.Second
 	// A server that Hetzner reports off or gone, while its node is NotReady, is dead.
 	deadGrace = 30 * time.Second
 	// A server Hetzner reports running but whose node stays NotReady gets one hard reset...

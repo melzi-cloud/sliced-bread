@@ -187,6 +187,7 @@ func TestNodeLoss(t *testing.T) {
 	for name, c := range checks {
 		go func(name string, c check) {
 			streak, streakStart, failed := 0, time.Time{}, 0
+			var failedAt []string
 			for time.Now().Before(deadline) {
 				start := time.Now()
 				if c.ok() {
@@ -195,13 +196,16 @@ func TestNodeLoss(t *testing.T) {
 					}
 					streak++
 					if streak >= c.stable {
-						t.Logf("%s: %d failed checks before recovering", name, failed)
+						t.Logf("%s: %d failed checks before recovering, at: %s", name, failed, strings.Join(failedAt, " "))
 						done <- result{name, streakStart.Sub(t0).Round(time.Second)}
 						return
 					}
 				} else {
 					streak = 0
 					failed++
+					if len(failedAt) < 60 {
+						failedAt = append(failedAt, start.Sub(t0).Round(time.Second).String())
+					}
 				}
 				time.Sleep(c.every)
 			}

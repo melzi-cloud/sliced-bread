@@ -27,7 +27,7 @@ func TestRenderUserDataInit(t *testing.T) {
 	for _, want := range []string{
 		"#cloud-config", "ed25519_private: |", "    -----BEGIN OPENSSH PRIVATE KEY-----",
 		"--cluster-init", "INSTALL_K3S_VERSION='v1.37.2+k3s1'", "--disable servicelb", "--disable local-storage",
-		"/var/lib/rancher/k3s/server/manifests/sb-traefik-config.yaml", "nodePort: 30443", "--token-file /etc/sb/k3s-token", "/etc/rancher/k3s/registries.yaml", "http://10.43.200.200:5000",
+		"/var/lib/rancher/k3s/server/manifests/sb-traefik-config.yaml", "nodePort: 30443", "nativeLBByDefault: true", "--token-file /etc/sb/k3s-token", "/etc/rancher/k3s/registries.yaml", "http://10.43.200.200:5000",
 		"ip saddr 10.42.0.0/16 ip daddr 169.254.169.254 counter drop", "systemctl enable --now sb-metadata-block.service", "ExecStart=/usr/sbin/nft -f /etc/sb/metadata-block.nft",
 	} {
 		if !strings.Contains(ud, want) {
