@@ -341,6 +341,12 @@ func (s *Server) recreateApp(ctx context.Context, name, snapshot string, m *rest
 	if err := a.Validate(); err != nil {
 		return nil, err
 	}
+	if !a.HasData() {
+		// Nothing to restore: the snapshot held only settings and source.
+		restored := apps.BackupRun{ID: "restored", Kind: "backup", Phase: "succeeded", Trigger: "found in backup repository", Snapshot: snapshot, StartedAt: now(), FinishedAt: now()}
+		a.Backup = &apps.BackupState{History: []apps.BackupRun{restored}, LastBackup: &restored}
+		return s.createRestored(ctx, a, m)
+	}
 	a.Paused = true
 	// The restored snapshot counts as the latest backup, so the app is not paused again
 	// for a fresh one right after it starts; the next scheduled backup runs as usual.
@@ -350,8 +356,14 @@ func (s *Server) recreateApp(ctx context.Context, name, snapshot string, m *rest
 		LastBackup: &restored,
 		Running:    &apps.BackupRun{ID: randID(6), Kind: "restore", Phase: "stopping", Trigger: "recreate from backup", Snapshot: snapshot, StartedAt: now()},
 	}
-	// The namespace and the app's secret values must exist before the first reconcile,
-	// or it would generate new secrets the restored data does not match.
+	return s.createRestored(ctx, a, m)
+}
+
+// createRestored saves a recreated app. The namespace and the app's secret values must
+// exist before the first reconcile, or it would generate new secrets the restored data
+// does not match.
+func (s *Server) createRestored(ctx context.Context, a *apps.App, m *restoredMeta) (*apps.App, error) {
+	name := a.Name
 	if err := s.kube.Apply(ctx, kube.Obj{"apiVersion": "v1", "kind": "Namespace", "metadata": kube.Obj{"name": apps.Namespace(name),
 		"labels": kube.Obj{"pod-security.kubernetes.io/enforce": "baseline", apps.ManagedByLabel: "slicedbread", apps.AppLabel: name}}}); err != nil {
 		return nil, err

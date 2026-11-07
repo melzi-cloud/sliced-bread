@@ -338,8 +338,8 @@ func now() string { return time.Now().UTC().Format(time.RFC3339) }
 
 // startBackupRun records a new run. Runs that need the app stopped begin in "stopping".
 func (s *Server) startBackupRun(ctx context.Context, a *apps.App, kind, trigger, snapshot string) (*apps.BackupRun, error) {
-	if !a.HasData() {
-		return nil, fmt.Errorf("app %s has no volume or database, so there is nothing to back up", a.Name)
+	if !a.HasData() && kind != "backup" {
+		return nil, fmt.Errorf("app %s has no volume or database; its backups hold only its settings and source, which bring it back if it is deleted (sb restore %s --recreate)", a.Name, a.Name)
 	}
 	c, err := s.backupConfig(ctx)
 	if err != nil {
@@ -468,7 +468,9 @@ func (s *Server) checkBackups(ctx context.Context, a *apps.App, c *BackupConfig)
 			a.Paused = false // left over from an interrupted run
 			return true
 		}
-		if c != nil && a.HasData() && s.backupDue(ctx, a, c, time.Now().UTC()) {
+		// Apps without data are backed up too: their snapshot holds the spec, secret values
+		// and uploaded source, which is what a whole-install restore needs.
+		if c != nil && s.backupDue(ctx, a, c, time.Now().UTC()) {
 			trigger := "schedule"
 			if a.Backup == nil || a.Backup.LastBackup == nil {
 				trigger = "initial"
@@ -525,7 +527,7 @@ func (s *Server) checkBackups(ctx context.Context, a *apps.App, c *BackupConfig)
 		return s.finishRun(a, run, "failed", "restic did not report a snapshot id")
 	}
 	s.finishRun(a, run, "succeeded", "")
-	if run.Kind == "backup" {
+	if run.Kind == "backup" && a.HasData() {
 		// Every backup is followed by a restore test of that snapshot.
 		test := &apps.BackupRun{ID: randID(6), Kind: "test", Trigger: "after backup " + run.ID, Snapshot: run.Snapshot, StartedAt: now(), Phase: "running"}
 		a.Backup.Running = test
@@ -611,6 +613,12 @@ func (s *Server) backupDue(ctx context.Context, a *apps.App, c *BackupConfig, t 
 // BackupSummary is one line of `sb backups`.
 func backupSummary(a *apps.App) string {
 	if !a.HasData() {
+		if b := a.Backup; b != nil && b.LastBackup != nil {
+			if b.LastBackup.Phase == "failed" {
+				return "settings backup FAILED " + b.LastBackup.StartedAt + ": " + b.LastBackup.Message
+			}
+			return "no data; settings and source backed up " + b.LastBackup.StartedAt
+		}
 		return ""
 	}
 	b := a.Backup
@@ -675,7 +683,10 @@ func (s *Server) obsoleteRestoreApprovals(app string) {
 // backupShort is the dashboard's one-word backup state.
 func backupShort(a *apps.App, now time.Time) string {
 	if !a.HasData() {
-		return "no data"
+		if b := a.Backup; b != nil && b.LastBackup != nil && b.LastBackup.Phase == "failed" {
+			return "settings backup FAILED"
+		}
+		return "no data (settings saved)"
 	}
 	b := a.Backup
 	switch {

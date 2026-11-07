@@ -39,6 +39,8 @@ bin/sb backups
 
 To let a coding agent operate it, give it [skill/SKILL.md](skill/SKILL.md). On the machine that ran `sb init` it can use the CLI as is; elsewhere it runs `sb login --api https://api.apps.example.com` and you approve that login in the dashboard. No CLI token can approve, change settings or see secrets. For automation such as CI, an admin can create an expiring admin token on the dashboard's Settings page.
 
+**Losing the whole install.** Every app is backed up, including apps without data (their snapshot holds settings, secret values and uploaded source). To rebuild elsewhere, run `sb init` with `SB_BACKUP_PASSWORD` set to the saved password and the same backup bucket and prefix, finish setup, then on the dashboard's Settings page use "Look in the backup repository" and "Recreate all". Use the same domain if you can: references like `${apps.analytics.url}` are recomputed, but URLs written into an app's own source (for example a tracking snippet) still point at the old domain until the app is redeployed with new ones.
+
 Other commands: `sb installs`, `sb upgrade <install>`, `sb setup-link <install>`, `sb ssh <install>` (SSH is only open to the IP address `sb init` ran from), `sb destroy <install>`.
 
 ## Sizes and cost

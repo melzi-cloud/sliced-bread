@@ -51,7 +51,7 @@ func (s *Server) apiBackups(w http.ResponseWriter, r *http.Request) {
 	}
 	filter := r.URL.Query().Get("app")
 	for _, a := range list {
-		if !a.HasData() || (filter != "" && a.Name != filter) {
+		if filter != "" && a.Name != filter {
 			continue
 		}
 		v.Apps = append(v.Apps, AppBackupStatus{Name: a.Name, Summary: backupSummary(a), Paused: a.Paused, State: a.Backup})

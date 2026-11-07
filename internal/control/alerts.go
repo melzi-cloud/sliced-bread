@@ -101,15 +101,15 @@ func (s *Server) alertConditions(ctx context.Context, list []*apps.App, bc *Back
 				Title:  a.Name + " is not running (" + st.State + ")",
 				Detail: st.Message, Hint: "sb status " + a.Name + " and sb logs " + a.Name}, appDownGrace})
 		}
-		if !a.HasData() {
-			continue
-		}
-		hasData = true
 		b := a.Backup
 		if b != nil && b.LastBackup != nil && b.LastBackup.Phase == "failed" {
 			add(condition{Alert{ID: "backup-failed/" + a.Name, Severity: "critical", App: a.Name,
 				Title: "backup of " + a.Name + " failed", Detail: b.LastBackup.Message, Hint: "sb backups " + a.Name}, 0})
 		}
+		if !a.HasData() {
+			continue
+		}
+		hasData = true
 		if b != nil && b.LastTest != nil && b.LastTest.Phase == "failed" {
 			add(condition{Alert{ID: "restore-test-failed/" + a.Name, Severity: "critical", App: a.Name,
 				Title:  "restore test of " + a.Name + " failed (snapshot " + short(b.LastTest.Snapshot) + ")",

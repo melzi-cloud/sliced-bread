@@ -170,7 +170,7 @@ sb backups --repository    # every app in the backup bucket, including deleted o
 sb restore <app> --recreate [--snapshot ID] --wait   # bring back a deleted app: spec, secrets, source and data
 ```
 
-Each snapshot carries the app's spec, its secret values and, for apps deployed with `--dir`, the uploaded source, so a deleted app can come back from the bucket alone. With an agent token `--recreate` needs human approval (exit code 3). The recreated app starts only after its data is restored.
+Each snapshot carries the app's spec, its secret values and, for apps deployed with `--dir`, the uploaded source, so a deleted app can come back from the bucket alone. With an agent token `--recreate` needs human approval (exit code 3). The recreated app starts only after its data is restored. Apps without a volume or database are backed up too (settings and source only), so they can be recreated the same way. After a whole install was rebuilt under a new domain, check apps whose source contains URLs of other apps (tracking snippets, API base URLs) and redeploy them with the new URLs.
 
 What a restore test checks, so you can report it accurately: restic restores the snapshot into a scratch namespace and verifies every file's content against the backup; the number of restored files must match the backup; template-required files must exist and be non-empty (Vaultwarden: `db.sqlite3`; its SQLite integrity is not checked); a database dump must load into a fresh Postgres with the same number of tables (rows are counted and reported). The first backup of a new app runs once it is running and its template setup has finished (trigger `initial`).
 

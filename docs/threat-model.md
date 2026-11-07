@@ -23,7 +23,7 @@ What SlicedBread protects against, what it does not, and where the trust boundar
 4. **Builds.** Source builds run in `sb-builds`, one pod each, rootless, unreachable from the network. The registry admits only build pods and the nodes; apps run images by digest.
 5. **App to node.** Pods cannot reach the Hetzner metadata service (it holds the original join token and host keys); the k3s join token is rotated once the cluster has formed. Containers run with privilege escalation off and a reduced capability set.
 6. **Agent to install.** Agent tokens can deploy and configure, but widening access, opening Vaultwarden signups, deleting apps and restoring data need a human approval in the browser: by an admin, or by a member when an admin has allowed that. A solo admin approves their own agent. Removing a member ends their sessions at once and revokes the agent tokens they approved. Approvals go stale when the app changes after the request.
-7. **Install to backup bucket.** Backups are encrypted by restic before upload. The bucket provider sees sizes and timing, not contents.
+7. **Install to backup bucket.** Backups are encrypted by restic before upload. The bucket provider sees sizes and timing, not contents. Snapshots also carry each app's secret values, so the bucket plus the encryption password is enough to rebuild the install: treat the password like a root credential.
 
 ## In scope
 
