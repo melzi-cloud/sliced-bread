@@ -168,47 +168,13 @@ func podName() string {
 	return h
 }
 
-// leader reports whether this replica holds the lease, taking or renewing it. A lease
-// not renewed for 15 seconds can be taken over.
-func (s *Server) leader(ctx context.Context) bool {
-	if s.kube == nil {
+// leading reports whether this replica holds the sb-control lease (renewed in the
+// background by s.elector).
+func (s *Server) leading() bool {
+	if s.kube == nil || s.elector == nil {
 		return true
 	}
-	me := podName()
-	now := time.Now().UTC()
-	stamp := now.Format("2006-01-02T15:04:05.000000Z")
-	var l kube.Obj
-	err := s.kube.Get(ctx, "coordination.k8s.io/v1", "Lease", s.cfg.Namespace, leaseName, &l)
-	if kube.IsNotFound(err) {
-		err = s.kube.Create(ctx, kube.Obj{"apiVersion": "coordination.k8s.io/v1", "kind": "Lease",
-			"metadata": kube.Obj{"name": leaseName, "namespace": s.cfg.Namespace},
-			"spec":     kube.Obj{"holderIdentity": me, "leaseDurationSeconds": 15, "renewTime": stamp, "acquireTime": stamp}})
-		return s.becomes(err == nil)
-	}
-	if err != nil {
-		return s.becomes(false)
-	}
-	spec, _ := l["spec"].(map[string]any)
-	holder, _ := spec["holderIdentity"].(string)
-	renew, _ := time.Parse(time.RFC3339Nano, kube.Str(l, "spec", "renewTime"))
-	if holder != me && now.Sub(renew) < 15*time.Second {
-		return s.becomes(false)
-	}
-	spec["holderIdentity"], spec["renewTime"], spec["leaseDurationSeconds"] = me, stamp, 15
-	if holder != me {
-		spec["acquireTime"] = stamp
-	}
-	return s.becomes(s.kube.Update(ctx, l) == nil)
-}
-
-func (s *Server) becomes(lead bool) bool {
-	if lead != s.isLeader {
-		if lead {
-			s.logf("this replica (%s) now runs background work", podName())
-		}
-		s.isLeader = lead
-	}
-	return lead
+	return s.elector.Leading()
 }
 
 // gcShared removes expired exchange nonces and device grants. Leader only.

@@ -164,7 +164,7 @@ metadata:
   name: sb-guard
   namespace: sb-system
 spec:
-  replicas: 1
+  replicas: {{.ControlReplicas}}
   selector:
     matchLabels: {app: sb-guard}
   template:
@@ -175,6 +175,11 @@ spec:
       # The server's own resolver: the guard must reach the Hetzner API even while
       # cluster DNS is down with a dead server.
       dnsPolicy: Default
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm: {topologyKey: kubernetes.io/hostname, labelSelector: {matchLabels: {app: sb-guard}}}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

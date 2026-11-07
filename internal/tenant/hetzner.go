@@ -314,7 +314,8 @@ func (p *Provisioner) createLB(ctx context.Context, st *State, name, runID strin
 			Protocol: hcloud.LoadBalancerServiceProtocolTCP, ListenPort: hcloud.Ptr(listen), DestinationPort: hcloud.Ptr(dest),
 			HealthCheck: &hcloud.LoadBalancerCreateOptsServiceHealthCheck{
 				Protocol: hcloud.LoadBalancerServiceProtocolTCP, Port: hcloud.Ptr(dest),
-				Interval: hcloud.Ptr(10 * time.Second), Timeout: hcloud.Ptr(5 * time.Second), Retries: hcloud.Ptr(3),
+				// Notice a server that stopped answering within about 6 seconds.
+				Interval: hcloud.Ptr(3 * time.Second), Timeout: hcloud.Ptr(2 * time.Second), Retries: hcloud.Ptr(2),
 			},
 		}
 	}

@@ -160,32 +160,64 @@ func TestNodeLoss(t *testing.T) {
 		t.Fatalf("power off: %v", err)
 	}
 
-	// 5. Measure.
-	results := map[string]time.Duration{}
-	checks := map[string]func() bool{
+	// 5. Measure. Each check runs on its own with its own cadence, so a slow one (the CLI,
+	// SSH) cannot delay the others.
+	// "Back" is the start of the final unbroken run of successes (stable in a row), so a
+	// lucky request during the outage does not count as recovery.
+	type check struct {
+		every  time.Duration
+		stable int
+		ok     func() bool
+	}
+	checks := map[string]check{
 		// /alive, not a login: Vaultwarden rate-limits logins, and polling would trip it.
-		"vaultwarden": func() bool { return httpOK(ctx, vault+"/alive") },
+		"vaultwarden": {time.Second, 30, func() bool { return httpOK(ctx, vault+"/alive") }},
+		"dashboard":   {time.Second, 30, func() bool { return httpOK(ctx, "https://auth."+st.Domain+"/login") }},
 		// stats reads from Umami's Postgres; the heartbeat page does not touch the database.
-		"umami":       func() bool { return try("action", "analytics", "stats") == nil },
-		"dashboard":   func() bool { return httpOK(ctx, "https://auth."+st.Domain+"/login") },
-		"replacement": func() bool { return replacementReady(ctx, p.HC, st, victim, srv.ID) },
+		"umami":       {5 * time.Second, 6, func() bool { return try("action", "analytics", "stats") == nil }},
+		"replacement": {10 * time.Second, 1, func() bool { return replacementReady(ctx, p.HC, st, victim, srv.ID) }},
 	}
-	// Give the cluster a moment to notice before declaring anything recovered.
-	time.Sleep(20 * time.Second)
+	type result struct {
+		name string
+		at   time.Duration
+	}
+	results := map[string]time.Duration{}
+	done := make(chan result, len(checks))
 	deadline := t0.Add(30 * time.Minute)
-	for len(results) < len(checks) && time.Now().Before(deadline) {
-		for name, f := range checks {
-			if _, done := results[name]; !done && f() {
-				results[name] = time.Since(t0).Round(time.Second)
-				t.Logf("%s back after %s", name, results[name])
+	for name, c := range checks {
+		go func(name string, c check) {
+			streak, streakStart, failed := 0, time.Time{}, 0
+			for time.Now().Before(deadline) {
+				start := time.Now()
+				if c.ok() {
+					if streak == 0 {
+						streakStart = start
+					}
+					streak++
+					if streak >= c.stable {
+						t.Logf("%s: %d failed checks before recovering", name, failed)
+						done <- result{name, streakStart.Sub(t0).Round(time.Second)}
+						return
+					}
+				} else {
+					streak = 0
+					failed++
+				}
+				time.Sleep(c.every)
 			}
-		}
-		time.Sleep(5 * time.Second)
+			done <- result{name, -1}
+		}(name, c)
 	}
-	for name := range checks {
-		if _, ok := results[name]; !ok {
-			t.Errorf("%s did not recover within 30 minutes", name)
+	// Give the cluster a moment to notice before anything counts as recovered: the checks
+	// above start now, so a success in the first seconds means the app never went down.
+	for range checks {
+		r := <-done
+		if r.at < 0 {
+			t.Errorf("%s did not recover within 30 minutes", r.name)
+			continue
 		}
+		results[r.name] = r.at
+		t.Logf("%s back after %s", r.name, r.at)
 	}
 
 	// 6. Data survived, and the CLI reaches the new server.
@@ -237,7 +269,9 @@ func (w testWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-var httpc = &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+// A fresh connection per request, like a new visitor; 3 seconds counts as failed.
+var httpc = &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{DisableKeepAlives: true},
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 func httpOK(ctx context.Context, u string) bool {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)

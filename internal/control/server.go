@@ -17,6 +17,7 @@ import (
 
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
 	"github.com/melzi-cloud/sliced-bread/internal/kube"
+	"github.com/melzi-cloud/sliced-bread/internal/lease"
 )
 
 // Config comes from environment variables set by the platform manifests.
@@ -72,7 +73,7 @@ type Server struct {
 	alertsAt          time.Time
 	alertsCache       []Alert
 	fallback          fallbackState
-	isLeader          bool
+	elector           *lease.Elector
 	draining          atomic.Bool
 	imageCheckAt      time.Time
 	sharedGCAt        time.Time
@@ -139,6 +140,12 @@ func (s *Server) Handler() http.Handler {
 // Run serves HTTP and runs the reconcile loop until ctx is done.
 func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	s.elector = &lease.Elector{Kube: s.kube, Namespace: s.cfg.Namespace, Name: leaseName, ID: podName(), OnChange: func(lead bool) {
+		if lead {
+			s.logf("this replica (%s) now runs background work", podName())
+		}
+	}}
+	go s.elector.Run(ctx)
 	go s.loop(ctx)
 	go func() {
 		<-ctx.Done()
@@ -166,7 +173,7 @@ func (s *Server) loop(ctx context.Context) {
 		// Every replica keeps its copy of the auth state current; only the lease holder
 		// runs background work (builds, backups, alerts, registry upkeep).
 		s.auth.refresh(ctx)
-		if s.leader(ctx) {
+		if s.leading() {
 			s.tick(ctx)
 			if time.Since(s.sharedGCAt) > 5*time.Minute {
 				s.gcShared(ctx)

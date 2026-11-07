@@ -20,6 +20,7 @@ import (
 
 	"github.com/melzi-cloud/sliced-bread/internal/kube"
 	"github.com/melzi-cloud/sliced-bread/internal/labels"
+	"github.com/melzi-cloud/sliced-bread/internal/lease"
 	"github.com/melzi-cloud/sliced-bread/internal/sshx"
 	"github.com/melzi-cloud/sliced-bread/internal/tenant"
 )
@@ -68,6 +69,9 @@ type Guard struct {
 	lastMsg string
 	dnsAt   time.Time
 	inMaint bool
+	// fast fencing
+	downSince map[string]time.Time
+	lbChecked bool
 }
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339) }
@@ -82,9 +86,21 @@ func (g *Guard) Run(ctx context.Context) error {
 		g.Logf = log.Printf
 	}
 	g.Logf("sb-guard: watching nodes")
+	// Two replicas on different servers; the lease holder acts, the other takes over
+	// within about 15 seconds if the holder's server dies.
+	el := &lease.Elector{Kube: g.Kube, Namespace: ns, Name: "sb-guard", OnChange: func(lead bool) {
+		if lead {
+			g.Logf("sb-guard: this replica is active")
+		} else {
+			g.Logf("sb-guard: standing by")
+		}
+	}}
+	go el.Run(ctx)
 	for {
-		if err := g.step(ctx); err != nil {
-			g.say("sb-guard: %v", err)
+		if el.Leading() {
+			if err := g.step(ctx); err != nil {
+				g.say("sb-guard: %v", err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -248,13 +264,28 @@ func (g *Guard) step(ctx context.Context) error {
 		g.dnsAt = time.Now()
 	}
 	g.finishLeftovers(ctx, info, list)
+	if !g.lbChecked {
+		if err := g.ensureLBHealthChecks(ctx, info); err != nil {
+			g.say("sb-guard: load balancer health checks: %v", err)
+		} else {
+			g.lbChecked = true
+		}
+	}
 	st := g.load(ctx)
 	now := time.Now()
+	down := g.fastFence(ctx, info, list, st.Active)
 	if st.Active != nil {
 		return g.continueRepair(ctx, info, st, nodes)
 	}
+	g.unfenceRecovered(ctx, list, down)
 	var bad []nodeView
 	for i, n := range nodes {
+		if at, off := down[n.Name]; off {
+			// Hetzner says the server is off: count from then, not from NotReady.
+			nodes[i].Ready, nodes[i].Since = false, at
+			bad = append(bad, nodes[i])
+			continue
+		}
 		if !n.Ready && !underMaintenance(list[indexOf(list, n.Name)], now) {
 			bad = append(bad, nodes[i])
 		}
@@ -672,4 +703,37 @@ func indexOf(list []kube.Obj, name string) int {
 		}
 	}
 	return 0
+}
+
+// unfenceRecovered undoes a fast fence when a server came back on before it was replaced
+// (someone powered it on again): taint removed, back into the load balancer.
+func (g *Guard) unfenceRecovered(ctx context.Context, list []kube.Obj, down map[string]time.Time) {
+	for _, n := range list {
+		name := kube.Str(n, "metadata", "name")
+		if _, still := down[name]; still {
+			continue
+		}
+		spec, _ := n["spec"].(map[string]any)
+		taints, _ := spec["taints"].([]any)
+		var keep []any
+		fenced := false
+		for _, t := range taints {
+			if m, _ := t.(map[string]any); m["key"] == outOfServiceTaint {
+				fenced = true
+				continue
+			}
+			keep = append(keep, t)
+		}
+		if !fenced || kube.Str(n, "metadata", "annotations", maintMarker) != "" {
+			continue
+		}
+		if keep == nil {
+			keep = []any{}
+		}
+		g.Kube.MergePatch(ctx, "v1", "Node", "", name, map[string]any{"spec": map[string]any{"taints": keep}})
+		if _, err := g.setRole(ctx, name, "server"); err != nil {
+			g.Logf("sb-guard: put %s back into the load balancer: %v", name, err)
+		}
+		g.Logf("sb-guard: server %s is running again; fence removed", name)
+	}
 }
