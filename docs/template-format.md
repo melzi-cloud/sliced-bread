@@ -116,7 +116,7 @@ Agents only ever see secret names. `sb env generate <app> KEY` does the same for
 settings:
   - name: signups
     description: Allow new accounts to register.
-    values: ["false", "true"]        # or `type: string` with an optional `pattern`
+    values: ["false", "true"]        # or `type: string` (optional `pattern`), `type: number`, `type: boolean`
     default: "false"
     approvalFor: ["true"]            # an agent setting this value waits for a human
     autoRevert: {after: 15m, to: "false"}   # sb-control turns it back by itself
@@ -152,6 +152,7 @@ An action is a script that runs as a Job next to the app (D-029).
 actions:
   - name: create_website
     description: Register a website and return the tracking snippet for its <head>.
+    image: ghcr.io/melzi-cloud/bakery-runtime:1.0.0@sha256:…   # sh, curl, jq
     run: actions/create-website.sh
     secrets: [UMAMI_ADMIN_PASSWORD]     # the only secrets the job receives
     input:
@@ -176,7 +177,7 @@ actions:
 ```
 
 **How an action runs:**
-- **Image:** a small runtime image we publish (`sh`, `curl`, `jq`, CA certificates), or `image:` per action, for example the app's own image when the action needs its CLI.
+- **Image:** every action names its image (`image:`), for example the app's own image when the action needs its CLI, or a Postgres image for `psql`. We publish a small runtime image (`sh`, `curl`, `jq`, CA certificates) that actions can choose.
 - **Environment:** `SB_APP_INTERNAL` (the first component's internal URL), `SB_APP_URL`, each input as `SB_INPUT_<NAME>`, and only the declared secrets.
 - **Network:** the job can reach the app and DNS, nothing else, unless the action lists `egress: [hosts]`.
 - **Result:** the script prints one JSON object as its last line; sb-control checks it against `output`. A non-zero exit fails the action with the script's last stderr line as the message. Time limit 60 seconds unless `timeout:` says otherwise.
@@ -290,11 +291,13 @@ secrets:
 - Running actions as Jobs and checking their output.
 - `autoRevert` timers.
 
-## Open questions for review
+## Review decisions (Antonio, 2026-11-07)
 
-1. **Images by digest:** require `@sha256:` in every template (my lean: yes, CI fills it in), or allow tags for community templates?
-2. **Action runtime:** one published runtime image with `sh`, `curl` and `jq` (lean), or let every action pick its image?
-3. **Extra hosts:** leave out of v1 (lean), or support a second host now because a launch template needs it?
-4. **Install actions blocking:** an app stays `configuring` until its `on: install` actions succeed (lean), or `running` with a warning?
-5. **Settings types:** enum and string with a pattern (lean), or also numbers and booleans?
-6. **Per-component replicas:** fixed numbers only (lean), or ranges for later autoscaling (task #29)?
+1. **Images by digest:** required in every template.
+2. **Action images:** each action names its own image (for example a Postgres image for an action that needs `psql`). A small runtime image with `sh`, `curl` and `jq` is published as a convenience, not a default.
+3. **Extra hosts:** explained; lean is to leave them for v2 (no launch template needs one). Open.
+4. **Install actions block:** the app shows `configuring` until its `on: install` actions succeed.
+5. **Settings types:** enum (`values`), string (optional `pattern`), number and boolean.
+6. **Replicas:** fixed numbers only; autoscaling later (task #29).
+
+Under discussion: replacing Vaultwarden's time-based signup window with team-only registration (registration paths behind the login wall), which would add `wallPaths` to `access`.
