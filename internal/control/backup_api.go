@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
 	"github.com/melzi-cloud/sliced-bread/internal/kube"
+	"github.com/melzi-cloud/sliced-bread/internal/schedule"
 )
 
 // BackupsView is GET /v1/backups.
@@ -40,7 +42,7 @@ func (s *Server) apiBackups(w http.ResponseWriter, r *http.Request) {
 	v := BackupsView{Configured: c != nil, Apps: []AppBackupStatus{}}
 	if c != nil {
 		v.Target = strings.TrimPrefix(c.Repository(), "s3:")
-		v.Schedule = "daily at " + twoDigit(c.Hour) + ":00 UTC, each backup followed by a restore test; keeps the last 10 snapshots plus 14 daily and 8 weekly"
+		v.Schedule = c.Schedule().String() + ", each backup followed by a restore test; keeps the last 10 snapshots plus 14 daily and 8 weekly"
 	} else {
 		v.Hint = "configure with: sb backups configure --endpoint https://... --bucket <bucket> (admin token)"
 	}
@@ -60,34 +62,68 @@ func (s *Server) apiBackups(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, v)
 }
 
-func twoDigit(n int) string {
-	if n < 10 {
-		return "0" + string(rune('0'+n))
-	}
-	return string(rune('0'+n/10)) + string(rune('0'+n%10))
-}
-
 func (s *Server) apiBackupConfig(w http.ResponseWriter, r *http.Request) {
 	if scopeOf(r) != ScopeAdmin {
 		fail(w, 403, "backups are configured by a human in the dashboard", "https://"+s.hosts().Auth()+"/settings")
 		return
 	}
-	var c BackupConfig
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&c); err != nil {
+	var req struct {
+		BackupConfig
+		// Schedule fields are optional: left out, the current schedule stays.
+		Hour    *int `json:"hour"`
+		Every   *int `json:"every"`
+		Weekday *int `json:"weekday"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
 		fail(w, 400, "bad JSON: "+err.Error(), "")
 		return
 	}
-	generated, err := s.configureBackups(r.Context(), &c, r.URL.Query().Get("hour") != "")
+	c := req.BackupConfig
+	var sched *schedule.Backup
+	if req.Hour != nil || req.Every != nil || req.Weekday != nil {
+		b := s.currentSchedule(r.Context())
+		if req.Hour != nil {
+			b.Hour = *req.Hour
+		}
+		if req.Every != nil {
+			b.Every = *req.Every
+		}
+		if req.Weekday != nil {
+			b.Weekday = time.Weekday(*req.Weekday)
+		}
+		sched = &b
+	}
+	generated, err := s.configureBackups(r.Context(), &c, sched)
 	if err != nil {
 		fail(w, 400, err.Error(), "")
 		return
 	}
-	resp := map[string]any{"configured": true, "target": strings.TrimPrefix(c.Repository(), "s3:"), "hour": c.Hour}
+	resp := map[string]any{"configured": true, "target": strings.TrimPrefix(c.Repository(), "s3:"), "hour": c.Hour, "every": c.Every,
+		"schedule": c.Schedule().String()}
 	if generated {
 		resp["password"] = c.Password
 		resp["note"] = "This is the encryption password of your backups. Store it somewhere safe outside this install: without it the backups cannot be read. `sb backups password` shows it again."
 	}
 	writeJSON(w, 200, resp)
+}
+
+// apiBackupSchedule changes when backups run (admin tokens; people use the dashboard).
+func (s *Server) apiBackupSchedule(w http.ResponseWriter, r *http.Request) {
+	if scopeOf(r) != ScopeAdmin {
+		fail(w, 403, "the backup schedule is changed by a human in the dashboard", "https://"+s.hosts().Auth()+"/settings")
+		return
+	}
+	var b schedule.Backup
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&b); err != nil {
+		fail(w, 400, "bad JSON: "+err.Error(), "")
+		return
+	}
+	b = b.Normalize()
+	if err := s.setBackupSchedule(r.Context(), b); err != nil {
+		fail(w, 400, err.Error(), "")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"schedule": b.String(), "maintenanceHour": b.MaintenanceHour()})
 }
 
 func (s *Server) apiBackupPassword(w http.ResponseWriter, r *http.Request) {
@@ -234,24 +270,38 @@ func (s *Server) exportData(ctx context.Context, withSecrets bool) (map[string]a
 	return out, nil
 }
 
+// currentSchedule is the stored backup schedule, or the default.
+func (s *Server) currentSchedule(ctx context.Context) schedule.Backup {
+	if prev, err := s.backupSecret(ctx); err == nil && prev != nil {
+		return prev.Schedule()
+	}
+	return schedule.Default()
+}
+
 // configureBackups validates and stores the backup target. The encryption password is the
 // one installed by sb init (or kept from an earlier configuration); a new one is generated
-// only if none exists. Returns whether it was generated here.
-func (s *Server) configureBackups(ctx context.Context, c *BackupConfig, hourSet bool) (bool, error) {
+// only if none exists. Returns whether it was generated here. A nil schedule keeps the
+// current one (daily at 03:00 UTC on a new install).
+func (s *Server) configureBackups(ctx context.Context, c *BackupConfig, sched *schedule.Backup) (bool, error) {
 	if c.Prefix == "" {
 		c.Prefix = "slicedbread/" + s.cfg.Domain
 	}
 	if c.Region == "" {
 		c.Region = "auto"
 	}
-	if c.Hour == 0 && !hourSet {
-		c.Hour = 3
-	}
-	if err := c.validate(); err != nil {
-		return false, err
-	}
 	prev, err := s.backupSecret(ctx)
 	if err != nil {
+		return false, err
+	}
+	switch {
+	case sched != nil:
+		c.setSchedule(*sched)
+	case prev != nil:
+		c.setSchedule(prev.Schedule())
+	default:
+		c.setSchedule(schedule.Default())
+	}
+	if err := c.validate(); err != nil {
 		return false, err
 	}
 	generated := false

@@ -2,28 +2,37 @@ package guard
 
 import (
 	"context"
-
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/hetznercloud/hcloud-go/v2/hcloud"
-	"github.com/melzi-cloud/sliced-bread/internal/labels"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/hetznercloud/hcloud-go/v2/hcloud"
+
+	"github.com/melzi-cloud/sliced-bread/internal/apps"
 	"github.com/melzi-cloud/sliced-bread/internal/kube"
+	"github.com/melzi-cloud/sliced-bread/internal/labels"
+	"github.com/melzi-cloud/sliced-bread/internal/schedule"
 	"github.com/melzi-cloud/sliced-bread/internal/tenant"
 )
 
-// OS maintenance. Once a day, an hour after the backup hour, the guard checks each server:
-// a privileged one-off Job makes sure Debian's unattended-upgrades installs security
-// updates, and reports whether a reboot is pending. Servers that need one are rebooted one
-// at a time: cordon, move stateless apps by starting their replacement elsewhere first,
-// move the rest, reboot, wait for Ready, uncordon. On 1-node installs the reboot happens
-// in the same nightly window and apps are down for a minute or two.
+// OS maintenance. Once a day, an hour after the first backup of the day (or when an admin
+// asks), the guard checks each server: a privileged one-off Job installs and configures
+// unattended-upgrades and needrestart, refreshes the package lists and asks
+// unattended-upgrade which security updates it would install. If any server has updates
+// waiting, every app with data must first have a backup from the last 3 hours whose
+// restore test passed; the guard asks sb-control for the missing ones (the sb-backup-request
+// ConfigMap) and waits. A failed backup postpones the night's updates (an alert says why).
+// Then, one server at a time, the guard runs unattended-upgrade itself, needrestart
+// restarts services still using replaced libraries, and a server that needs a reboot (a new
+// kernel) is rebooted the same night: cordon, move stateless apps by starting their
+// replacement elsewhere first, move the rest, reboot, wait for Ready, uncordon. On 1-node
+// installs the reboot happens in the same window and apps are down for a minute or two.
 
 const (
 	opsNamespace      = "sb-node-ops"
@@ -33,26 +42,90 @@ const (
 	settleAfterReboot = 2 * time.Minute
 	maintMarker       = "slicedbread.dev/maintenance"
 	maintBoot         = "slicedbread.dev/maintenance-boot"
+
+	// BackupRequestConfigMap is where the guard asks sb-control for backups before updates.
+	BackupRequestConfigMap = "sb-backup-request"
+	// BackupFreshness is how recent a backup must be before updates are installed.
+	BackupFreshness = 3 * time.Hour
+	// backupWaitMax is how long the guard waits for the backups before it postpones.
+	backupWaitMax = 3 * time.Hour
+
+	phaseChecking = "checking"
+	phaseBackups  = "backups"
+	phaseUpdating = "updating"
 )
 
 // MaintState is kept in the sb-maintenance ConfigMap.
 type MaintState struct {
-	Requested string               `json:"requested,omitempty"` // set by the dashboard: run now
-	LastRun   string               `json:"lastRun,omitempty"`
-	Running   bool                 `json:"running,omitempty"`
-	Nodes     map[string]NodeMaint `json:"nodes,omitempty"`
-	Log       []string             `json:"log,omitempty"`
+	Requested   string               `json:"requested,omitempty"` // set by the dashboard: run now
+	LastRun     string               `json:"lastRun,omitempty"`
+	Running     bool                 `json:"running,omitempty"`
+	Phase       string               `json:"phase,omitempty"` // checking, backups, updating
+	Backups     *BackupWait          `json:"backups,omitempty"`
+	Postponed   *Postponed           `json:"postponed,omitempty"`   // the last run did not install updates
+	LastUpdated string               `json:"lastUpdated,omitempty"` // last run that finished installing
+	Nodes       map[string]NodeMaint `json:"nodes,omitempty"`
+	Log         []string             `json:"log,omitempty"`
+}
+
+// BackupWait is the backups-before-updates step of a run.
+type BackupWait struct {
+	RequestedAt string   `json:"requestedAt"`
+	FreshSince  string   `json:"freshSince"`
+	Waiting     []string `json:"waiting,omitempty"` // "app: why"
+	DoneAt      string   `json:"doneAt,omitempty"`
+}
+
+// Postponed says why a run installed nothing.
+type Postponed struct {
+	At     string `json:"at"`
+	Reason string `json:"reason"`
 }
 
 // NodeMaint is the last result for one server.
 type NodeMaint struct {
 	CheckedAt     string `json:"checkedAt"`
 	RebootNeeded  bool   `json:"rebootNeeded"`
+	RebootFor     string `json:"rebootFor,omitempty"` // packages that asked for the reboot
 	Upgradable    int    `json:"upgradable"`
-	Kernel        string `json:"kernel,omitempty"`
-	LastRebootAt  string `json:"lastRebootAt,omitempty"`
+	Pending       int    `json:"pending"`                 // security updates waiting; -1 unknown
+	PendingPkgs   string `json:"pendingPkgs,omitempty"`   // their names
+	Installed     string `json:"installed,omitempty"`     // packages the last run installed
+	InstalledAt   string `json:"installedAt,omitempty"`   // when
+	Restarted     string `json:"restarted,omitempty"`     // services needrestart restarted
+	Kernel        string `json:"kernel,omitempty"`        //
+	LastRebootAt  string `json:"lastRebootAt,omitempty"`  //
 	LastRebootFor string `json:"lastRebootFor,omitempty"` // how long the server was away
 	Error         string `json:"error,omitempty"`
+}
+
+// BackupRequest asks sb-control to back up every app with data that has no backup since
+// FreshSince. sb-control's leader starts the missing backups (each followed by its
+// restore test); the guard watches the App resources and deletes the request when done.
+type BackupRequest struct {
+	RequestedAt string `json:"requestedAt"`
+	FreshSince  string `json:"freshSince"`
+	Reason      string `json:"reason"`
+}
+
+// Times returns the request's times.
+func (r *BackupRequest) Times() (freshSince, requested time.Time) {
+	freshSince, _ = time.Parse(time.RFC3339, r.FreshSince)
+	requested, _ = time.Parse(time.RFC3339, r.RequestedAt)
+	return
+}
+
+// LoadBackupRequest returns the open request, or nil.
+func LoadBackupRequest(ctx context.Context, k *kube.Client) *BackupRequest {
+	var cm kube.Obj
+	if err := k.Get(ctx, "v1", "ConfigMap", ns, BackupRequestConfigMap, &cm); err != nil {
+		return nil
+	}
+	var r BackupRequest
+	if json.Unmarshal([]byte(kube.Str(cm, "data", "request.json")), &r) != nil || r.RequestedAt == "" {
+		return nil
+	}
+	return &r
 }
 
 func (g *Guard) loadMaint(ctx context.Context) *MaintState {
@@ -60,6 +133,11 @@ func (g *Guard) loadMaint(ctx context.Context) *MaintState {
 	var cm kube.Obj
 	if err := g.Kube.Get(ctx, "v1", "ConfigMap", ns, maintConfigMap, &cm); err == nil {
 		json.Unmarshal([]byte(kube.Str(cm, "data", "state.json")), st)
+		// "Run now" is a separate key written with a merge patch, so the guard saving its
+		// state (server-side apply of state.json only) never drops a request.
+		if r := kube.Str(cm, "data", "requested"); r > st.Requested {
+			st.Requested = r
+		}
 	}
 	if st.Nodes == nil {
 		st.Nodes = map[string]NodeMaint{}
@@ -68,8 +146,8 @@ func (g *Guard) loadMaint(ctx context.Context) *MaintState {
 }
 
 func (g *Guard) saveMaint(ctx context.Context, st *MaintState) error {
-	if len(st.Log) > 40 {
-		st.Log = st.Log[len(st.Log)-40:]
+	if len(st.Log) > 60 {
+		st.Log = st.Log[len(st.Log)-60:]
 	}
 	b, _ := json.Marshal(st)
 	return g.Kube.Apply(ctx, kube.Obj{"apiVersion": "v1", "kind": "ConfigMap",
@@ -87,26 +165,31 @@ func LoadMaint(ctx context.Context, k *kube.Client) *MaintState {
 	return (&Guard{Kube: k}).loadMaint(ctx)
 }
 
-// RequestMaintenance asks the guard to run a maintenance cycle now.
+// RequestMaintenance asks the guard to run a maintenance cycle now. It takes the same path
+// as the nightly run, backups first.
 func RequestMaintenance(ctx context.Context, k *kube.Client) error {
-	g := &Guard{Kube: k, Logf: func(string, ...any) {}}
-	st := g.loadMaint(ctx)
-	st.Requested = time.Now().UTC().Format(time.RFC3339)
-	return g.saveMaint(ctx, st)
+	now := time.Now().UTC().Format(time.RFC3339)
+	err := k.MergePatch(ctx, "v1", "ConfigMap", ns, maintConfigMap, map[string]any{"data": map[string]any{"requested": now}})
+	if kube.IsNotFound(err) {
+		st := &MaintState{Requested: now}
+		b, _ := json.Marshal(st)
+		return k.Apply(ctx, kube.Obj{"apiVersion": "v1", "kind": "ConfigMap",
+			"metadata": kube.Obj{"name": maintConfigMap, "namespace": ns}, "data": kube.Obj{"state.json": string(b)}})
+	}
+	return err
 }
 
-// maintenanceHour is an hour after the backup hour (default 03:00 UTC).
-func (g *Guard) maintenanceHour(ctx context.Context) int {
-	hour := 3
+// backupSettings reads the backup schedule and whether a bucket is configured.
+func (g *Guard) backupSettings(ctx context.Context) (schedule.Backup, bool) {
 	var sec kube.Obj
-	if err := g.Kube.Get(ctx, "v1", "Secret", ns, "sb-backup", &sec); err == nil {
-		if b, err := base64.StdEncoding.DecodeString(kube.Str(sec, "data", "hour")); err == nil {
-			if h, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && h >= 0 && h < 24 {
-				hour = h
-			}
-		}
+	if err := g.Kube.Get(ctx, "v1", "Secret", ns, "sb-backup", &sec); err != nil {
+		return schedule.Default(), false
 	}
-	return (hour + 1) % 24
+	d := func(k string) string {
+		b, _ := base64.StdEncoding.DecodeString(kube.Str(sec, "data", k))
+		return string(b)
+	}
+	return schedule.FromStrings(d("hour"), d("every"), d("weekday")), d("endpoint") != "" && d("bucket") != ""
 }
 
 // maintenanceDue reports whether a cycle should start now.
@@ -119,11 +202,22 @@ func maintenanceDue(st *MaintState, hour int, now time.Time) bool {
 	return !now.Before(window) && now.Before(window.Add(2*time.Hour)) && last.Before(window)
 }
 
-// maybeMaintain runs a whole maintenance cycle when due. It blocks the guard loop while it
-// runs (node repair waits; maintenance only starts when all nodes are Ready).
+// maybeMaintain starts a maintenance cycle when due, or advances one waiting for backups.
+// Checking and installing block the guard loop while they run (node repair waits;
+// maintenance only starts when all nodes are Ready); waiting for backups does not.
 func (g *Guard) maybeMaintain(ctx context.Context, info *tenant.ClusterInfo, nodes []nodeView) {
 	st := g.loadMaint(ctx)
-	if !maintenanceDue(st, g.maintenanceHour(ctx), time.Now().UTC()) {
+	if st.Running && st.Phase == phaseBackups {
+		g.continueBackups(ctx, info, nodes, st)
+		return
+	}
+	if st.Running && !g.inMaint && !g.rebootInProgress(ctx) {
+		// A guard stopped in the middle of a run (not by rebooting its own server, which
+		// finishLeftovers completes). The next run starts over.
+		g.endRun(ctx, st, "maintenance interrupted (the guard restarted); it runs again at the next window or request")
+	}
+	sched, configured := g.backupSettings(ctx)
+	if !maintenanceDue(st, sched.MaintenanceHour(), time.Now().UTC()) {
 		return
 	}
 	for _, n := range nodes {
@@ -132,42 +226,240 @@ func (g *Guard) maybeMaintain(ctx context.Context, info *tenant.ClusterInfo, nod
 			return
 		}
 	}
-	st.Running, st.LastRun = true, time.Now().UTC().Format(time.RFC3339)
+	st.Running, st.LastRun, st.Phase, st.Backups = true, time.Now().UTC().Format(time.RFC3339), phaseChecking, nil
 	g.mlog(st, "maintenance started (%d servers)", len(nodes))
 	g.saveMaint(ctx, st)
 	if err := g.ensureOpsNamespace(ctx); err != nil {
-		g.mlog(st, "maintenance stopped: %v", err)
-		st.Running = false
-		g.saveMaint(ctx, st)
+		g.endRun(ctx, st, "maintenance stopped: %v", err)
 		return
 	}
 	g.inMaint = true
 	defer func() { g.inMaint = false }()
-	// The guard's own server goes last: its reboot ends this process, and the guard that
-	// comes up elsewhere finishes it (see finishLeftovers).
+	pending := g.checkNodes(ctx, nodes, st)
+	if len(pending) == 0 {
+		g.mlog(st, "no security updates waiting")
+		g.applyUpdates(ctx, info, nodes, st)
+		return
+	}
+	g.mlog(st, "security updates waiting on %s", strings.Join(pending, ", "))
+	if !configured {
+		g.mlog(st, "backups are not configured, so updates install without a backup first")
+		g.applyUpdates(ctx, info, nodes, st)
+		return
+	}
+	now := time.Now().UTC()
+	req := BackupRequest{RequestedAt: now.Format(time.RFC3339), FreshSince: now.Add(-BackupFreshness).Format(time.RFC3339),
+		Reason: "OS updates waiting on " + strings.Join(pending, ", ")}
+	if err := g.writeBackupRequest(ctx, req); err != nil {
+		g.endRun(ctx, st, "maintenance stopped: could not ask for backups: %v", err)
+		return
+	}
+	st.Phase, st.Backups = phaseBackups, &BackupWait{RequestedAt: req.RequestedAt, FreshSince: req.FreshSince}
+	g.mlog(st, "waiting for a backup from the last %s with a passed restore test of every app with data", BackupFreshness)
+	g.saveMaint(ctx, st)
+	g.inMaint = false
+	g.continueBackups(ctx, info, nodes, st)
+}
+
+// rebootInProgress reports whether a server carries the planned-reboot marker.
+func (g *Guard) rebootInProgress(ctx context.Context) bool {
+	list, err := g.Kube.List(ctx, "v1", "Node", "", "")
+	if err != nil {
+		return true // cannot tell; leave the state alone
+	}
+	for _, n := range list {
+		if kube.Str(n, "metadata", "annotations", maintMarker) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// endRun stops a run with a message.
+func (g *Guard) endRun(ctx context.Context, st *MaintState, format string, a ...any) {
+	g.mlog(st, format, a...)
+	st.Running, st.Phase = false, ""
+	g.saveMaint(ctx, st)
+}
+
+func (g *Guard) writeBackupRequest(ctx context.Context, r BackupRequest) error {
+	b, _ := json.Marshal(r)
+	return g.Kube.Apply(ctx, kube.Obj{"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": kube.Obj{"name": BackupRequestConfigMap, "namespace": ns, "labels": kube.Obj{"app.kubernetes.io/managed-by": "slicedbread"}},
+		"data":     kube.Obj{"request.json": string(b)}})
+}
+
+func (g *Guard) clearBackupRequest(ctx context.Context) {
+	if err := g.Kube.Delete(ctx, "v1", "ConfigMap", ns, BackupRequestConfigMap); err != nil && !kube.IsNotFound(err) {
+		g.Logf("sb-guard: delete backup request: %v", err)
+	}
+}
+
+func (g *Guard) listApps(ctx context.Context) ([]*apps.App, error) {
+	items, err := g.Kube.List(ctx, "slicedbread.dev/v1alpha1", "App", "", "")
+	if err != nil {
+		return nil, err
+	}
+	var out []*apps.App
+	for _, it := range items {
+		b, _ := json.Marshal(it["spec"])
+		var a apps.App
+		if json.Unmarshal(b, &a) == nil {
+			a.Name = kube.Str(it, "metadata", "name")
+			out = append(out, &a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// backupsVerdict sums up the apps' gates: failed reasons and the apps still waiting.
+func backupsVerdict(list []*apps.App, freshSince, requested time.Time) (failed, waiting []string) {
+	for _, a := range list {
+		switch g, why := apps.UpdateGate(a, freshSince, requested); g {
+		case apps.GateFailed:
+			failed = append(failed, a.Name+": "+why)
+		case apps.GatePending:
+			waiting = append(waiting, a.Name+": "+why)
+		}
+	}
+	return
+}
+
+// continueBackups checks the backups a run waits for; once every app with data has a
+// fresh tested backup it installs the updates.
+func (g *Guard) continueBackups(ctx context.Context, info *tenant.ClusterInfo, nodes []nodeView, st *MaintState) {
+	bw := st.Backups
+	if bw == nil {
+		g.endRun(ctx, st, "maintenance stopped: lost track of the backups")
+		return
+	}
+	requested, _ := time.Parse(time.RFC3339, bw.RequestedAt)
+	freshSince, _ := time.Parse(time.RFC3339, bw.FreshSince)
+	list, err := g.listApps(ctx)
+	if err != nil {
+		g.say("sb-guard: maintenance: list apps: %v", err)
+		return
+	}
+	failed, waiting := backupsVerdict(list, freshSince, requested)
+	if len(failed) > 0 {
+		g.postpone(ctx, st, "backup failed ("+strings.Join(failed, "; ")+")")
+		return
+	}
+	if len(waiting) > 0 {
+		if time.Since(requested) > backupWaitMax {
+			g.postpone(ctx, st, fmt.Sprintf("backups did not finish within %s (%s)", backupWaitMax, strings.Join(waiting, "; ")))
+			return
+		}
+		if strings.Join(waiting, "|") != strings.Join(bw.Waiting, "|") {
+			bw.Waiting = waiting
+			g.saveMaint(ctx, st)
+		}
+		g.say("sb-guard: maintenance waits for backups: %s", strings.Join(waiting, "; "))
+		return
+	}
+	for _, n := range nodes {
+		if !n.Ready {
+			g.say("sb-guard: maintenance waits: %s is NotReady", n.Name)
+			return
+		}
+	}
+	bw.Waiting, bw.DoneAt = nil, time.Now().UTC().Format(time.RFC3339)
+	g.clearBackupRequest(ctx)
+	g.mlog(st, "backups done: every app with data has a backup from the last %s with a passed restore test", BackupFreshness)
+	g.applyUpdates(ctx, info, nodes, st)
+}
+
+// postpone ends a run without installing anything.
+func (g *Guard) postpone(ctx context.Context, st *MaintState, reason string) {
+	g.clearBackupRequest(ctx)
+	st.Postponed = &Postponed{At: time.Now().UTC().Format(time.RFC3339), Reason: reason}
+	g.endRun(ctx, st, "updates postponed: %s", reason)
+}
+
+// checkNodes runs the check job on every server at once. It returns the servers with
+// security updates waiting (or whose check could not tell).
+func (g *Guard) checkNodes(ctx context.Context, nodes []nodeView, st *MaintState) []string {
+	res := make([]NodeMaint, len(nodes))
+	var wg sync.WaitGroup
+	for i, n := range nodes {
+		wg.Add(1)
+		go func(i int, node string) {
+			defer wg.Done()
+			res[i] = g.checkNode(ctx, node)
+		}(i, n.Name)
+	}
+	wg.Wait()
+	var pending []string
+	for i, n := range nodes {
+		r, prev := res[i], st.Nodes[n.Name]
+		r.LastRebootAt, r.LastRebootFor = prev.LastRebootAt, prev.LastRebootFor
+		r.Installed, r.InstalledAt, r.Restarted = prev.Installed, prev.InstalledAt, prev.Restarted
+		st.Nodes[n.Name] = r
+		switch {
+		case r.Error != "":
+			g.mlog(st, "%s: check failed: %s", n.Name, r.Error)
+		case r.Pending != 0:
+			pending = append(pending, n.Name)
+			what := r.PendingPkgs
+			if r.Pending < 0 {
+				what = "unknown (treated as waiting)"
+			}
+			g.mlog(st, "%s: updates waiting: %s", n.Name, what)
+		}
+	}
+	g.saveMaint(ctx, st)
+	return pending
+}
+
+// applyUpdates installs the waiting updates one server at a time and reboots the servers
+// that need it. The guard's own server goes last: its reboot ends this process, and the
+// guard that comes up elsewhere finishes it (see finishLeftovers).
+func (g *Guard) applyUpdates(ctx context.Context, info *tenant.ClusterInfo, nodes []nodeView, st *MaintState) {
+	g.inMaint = true
+	defer func() { g.inMaint = false }()
+	st.Phase, st.Postponed = phaseUpdating, nil
+	g.saveMaint(ctx, st)
 	ordered := append([]nodeView{}, nodes...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[j].Name == os.Getenv("NODE_NAME") })
+	clean := true
 	for _, n := range ordered {
-		res := g.checkNode(ctx, n.Name)
-		prev := st.Nodes[n.Name]
-		res.LastRebootAt, res.LastRebootFor = prev.LastRebootAt, prev.LastRebootFor
-		st.Nodes[n.Name] = res
-		g.saveMaint(ctx, st)
+		res := st.Nodes[n.Name]
 		if res.Error != "" {
-			g.mlog(st, "%s: check failed: %s", n.Name, res.Error)
+			clean = false
 			continue
+		}
+		if res.Pending != 0 {
+			g.mlog(st, "%s: installing updates", n.Name)
+			g.saveMaint(ctx, st)
+			res = g.installNode(ctx, n.Name, res)
+			st.Nodes[n.Name] = res
+			if res.Error != "" {
+				clean = false
+				g.mlog(st, "%s: installing updates failed: %s", n.Name, res.Error)
+				g.saveMaint(ctx, st)
+				continue
+			}
+			g.mlog(st, "%s: installed %s; services restarted by needrestart: %s", n.Name, orNone(res.Installed), orNone(res.Restarted))
+			g.saveMaint(ctx, st)
 		}
 		if !res.RebootNeeded {
 			g.mlog(st, "%s: up to date, no reboot needed (%d upgradable packages left for apt)", n.Name, res.Upgradable)
 			continue
 		}
-		g.mlog(st, "%s: reboot needed after updates", n.Name)
+		g.mlog(st, "%s: reboot needed (for %s), rebooting", n.Name, orNone(res.RebootFor))
+		g.saveMaint(ctx, st)
+		if n.Name == os.Getenv("NODE_NAME") && clean {
+			// The reboot may end this process; record a finished install first.
+			st.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+		}
 		took, err := g.rebootNode(ctx, info, n.Name, st)
 		res = st.Nodes[n.Name]
 		if err != nil {
 			res.Error = err.Error()
 			st.Nodes[n.Name] = res
 			g.mlog(st, "%s: maintenance stopped: %v", n.Name, err)
+			clean = false
 			break // never take a second server down after a failure
 		}
 		res.RebootNeeded, res.LastRebootAt, res.LastRebootFor = false, time.Now().UTC().Format(time.RFC3339), took.Round(time.Second).String()
@@ -175,15 +467,90 @@ func (g *Guard) maybeMaintain(ctx context.Context, info *tenant.ClusterInfo, nod
 		g.mlog(st, "%s: rebooted and back after %s", n.Name, took.Round(time.Second))
 		g.saveMaint(ctx, st)
 	}
-	st.Running = false
-	g.mlog(st, "maintenance finished")
-	g.saveMaint(ctx, st)
+	if clean {
+		st.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	}
+	g.endRun(ctx, st, "maintenance finished")
+}
+
+func orNone(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "none"
+	}
+	return s
 }
 
 func (g *Guard) ensureOpsNamespace(ctx context.Context) error {
 	return g.Kube.Apply(ctx, kube.Obj{"apiVersion": "v1", "kind": "Namespace", "metadata": kube.Obj{"name": opsNamespace,
 		"labels": kube.Obj{"pod-security.kubernetes.io/enforce": "privileged", "app.kubernetes.io/managed-by": "slicedbread"}}})
 }
+
+// hostScriptPrelude is shared by the host scripts.
+const hostScriptPrelude = `set -e
+export DEBIAN_FRONTEND=noninteractive LANG=C LC_ALL=C
+aptq() { apt-get -o DPkg::Lock::Timeout=600 -qq "$@"; }
+report() {
+  echo "SB_UPGRADABLE $(apt list --upgradable 2>/dev/null | grep -c upgradable || true)"
+  echo "SB_KERNEL $(uname -r)"
+  if [ -f /run/reboot-required ]; then echo "SB_REBOOT yes"; else echo "SB_REBOOT no"; fi
+  if [ -f /run/reboot-required.pkgs ]; then echo "SB_REBOOT_PKGS $(sort -u /run/reboot-required.pkgs | tr '\n' ' ')"; fi
+}
+`
+
+// checkScript installs and configures unattended-upgrades and needrestart, refreshes the
+// package lists and reports which security updates unattended-upgrade would install.
+// Nothing is installed by the system timers: updates only install in the guard's nightly
+// run, after the backups.
+const checkScript = hostScriptPrelude + `aptq update
+missing=""
+for p in unattended-upgrades needrestart; do dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"; done
+if [ -n "$missing" ]; then aptq install -y $missing >/dev/null; fi
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+// Written by SlicedBread: package lists refresh daily; sb-guard installs security updates
+// itself in the nightly maintenance run, after backups.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+# The guard reboots servers one at a time; apt must never reboot by itself.
+echo 'Unattended-Upgrade::Automatic-Reboot "false";' > /etc/apt/apt.conf.d/52sb-no-reboot
+mkdir -p /etc/needrestart/conf.d
+cat > /etc/needrestart/conf.d/50-slicedbread.conf <<'EOF'
+# Written by SlicedBread: restart services that still use replaced libraries, without asking.
+$nrconf{restart} = 'a';
+$nrconf{kernelhints} = 0;
+$nrconf{ucodehints} = 0;
+# k3s runs the cluster on this server; it restarts with the server's reboot instead.
+$nrconf{override_rc}{qr(^k3s)} = 0;
+EOF
+systemctl enable --now apt-daily.timer >/dev/null 2>&1 || true
+out=$(unattended-upgrade --dry-run -v 2>&1 || true)
+if echo "$out" | grep -q "Packages that will be upgraded:"; then
+  pk=$(echo "$out" | sed -n 's/.*Packages that will be upgraded: *//p' | tail -1)
+  echo "SB_PENDING $(echo $pk | wc -w)"
+  echo "SB_PENDING_PKGS $pk"
+elif echo "$out" | grep -q "No packages found that can be upgraded"; then
+  echo "SB_PENDING 0"
+else
+  echo "$out" | tail -5
+  echo "SB_PENDING unknown"
+fi
+report
+`
+
+// installScript installs the waiting security updates with unattended-upgrade (from the
+// lists the check read), then lets needrestart restart services that still use replaced
+// files. needrestart's apt hook is suspended during the install so its restarts happen
+// once, here, where they are reported.
+const installScript = hostScriptPrelude + `log=$(mktemp)
+if ! NEEDRESTART_SUSPEND=1 unattended-upgrade -v >"$log" 2>&1; then tail -5 "$log"; echo "SB_ERROR unattended-upgrade failed: $(tail -1 "$log")"; exit 1; fi
+echo "SB_INSTALLED $(sed -n 's/.*Packages that will be upgraded: *//p' "$log" | tail -1)"
+rm -f "$log"
+nr=$(needrestart -r a -u NeedRestart::UI::stdio -l 2>&1 || true)
+echo "$nr" | tail -8
+echo "SB_RESTARTED $(echo "$nr" | sed -n 's/^ *systemctl restart //p' | tr '\n' ' ')"
+echo "SB_STALE $(needrestart -b -l 2>/dev/null | sed -n 's/^NEEDRESTART-SVC: //p' | tr '\n' ' ')"
+report
+`
 
 // hostJob runs a script in the host's namespaces on one node.
 func hostJob(name, node, script string) kube.Obj {
@@ -204,25 +571,6 @@ func hostJob(name, node, script string) kube.Obj {
 		},
 	}
 }
-
-// checkScript makes sure security updates install by themselves and reports whether the
-// server needs a reboot.
-const checkScript = `set -e
-export DEBIAN_FRONTEND=noninteractive
-if ! dpkg -s unattended-upgrades >/dev/null 2>&1; then
-  apt-get update -qq && apt-get install -y -qq unattended-upgrades >/dev/null
-fi
-cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-EOF
-# The guard reboots servers one at a time; apt must never reboot by itself.
-echo 'Unattended-Upgrade::Automatic-Reboot "false";' > /etc/apt/apt.conf.d/52sb-no-reboot
-systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
-echo "SB_UPGRADABLE $(apt list --upgradable 2>/dev/null | grep -c upgradable || true)"
-echo "SB_KERNEL $(uname -r)"
-if [ -f /run/reboot-required ]; then echo "SB_REBOOT yes"; else echo "SB_REBOOT no"; fi
-`
 
 // runHostJob runs a host job and returns its SB_ lines.
 func (g *Guard) runHostJob(ctx context.Context, name, node, script string, timeout time.Duration) (map[string]string, error) {
@@ -268,14 +616,42 @@ func jobID() string { return strconv.FormatInt(time.Now().Unix()%1_000_000, 36) 
 
 func (g *Guard) checkNode(ctx context.Context, node string) NodeMaint {
 	res := NodeMaint{CheckedAt: time.Now().UTC().Format(time.RFC3339)}
-	out, err := g.runHostJob(ctx, "check-"+shortName(node)+"-"+jobID(), node, checkScript, 10*time.Minute)
+	out, err := g.runHostJob(ctx, "check-"+shortName(node)+"-"+jobID(), node, checkScript, 15*time.Minute)
 	if err != nil {
 		res.Error = err.Error()
 		return res
 	}
-	res.RebootNeeded = out["SB_REBOOT"] == "yes"
+	res.RebootNeeded, res.RebootFor = out["SB_REBOOT"] == "yes", strings.TrimSpace(out["SB_REBOOT_PKGS"])
 	res.Upgradable, _ = strconv.Atoi(out["SB_UPGRADABLE"])
 	res.Kernel = out["SB_KERNEL"]
+	if n, err := strconv.Atoi(out["SB_PENDING"]); err == nil {
+		res.Pending = n
+	} else {
+		res.Pending = -1 // the check could not tell: install, after backups
+	}
+	res.PendingPkgs = out["SB_PENDING_PKGS"]
+	return res
+}
+
+// installNode installs the waiting updates on one server.
+func (g *Guard) installNode(ctx context.Context, node string, res NodeMaint) NodeMaint {
+	out, err := g.runHostJob(ctx, "install-"+shortName(node)+"-"+jobID(), node, installScript, 20*time.Minute)
+	if err != nil {
+		if e := out["SB_ERROR"]; e != "" {
+			err = fmt.Errorf("%s", e)
+		}
+		res.Error = err.Error()
+		return res
+	}
+	res.Pending, res.PendingPkgs = 0, ""
+	res.Installed, res.InstalledAt = strings.TrimSpace(out["SB_INSTALLED"]), time.Now().UTC().Format(time.RFC3339)
+	res.Restarted = strings.TrimSpace(out["SB_RESTARTED"])
+	res.RebootNeeded, res.RebootFor = out["SB_REBOOT"] == "yes", strings.TrimSpace(out["SB_REBOOT_PKGS"])
+	res.Upgradable, _ = strconv.Atoi(out["SB_UPGRADABLE"])
+	res.Kernel = out["SB_KERNEL"]
+	if stale := strings.TrimSpace(out["SB_STALE"]); stale != "" {
+		g.Logf("sb-guard: %s: services still using replaced files after needrestart: %s", node, stale)
+	}
 	return res
 }
 
@@ -607,7 +983,7 @@ func (g *Guard) finishLeftovers(ctx context.Context, info *tenant.ClusterInfo, l
 			g.mlog(st, "%s: %s", v.Name, res.Error)
 		}
 		st.Nodes[v.Name] = res
-		st.Running = false
+		st.Running, st.Phase = false, ""
 		g.mlog(st, "maintenance finished")
 		g.saveMaint(ctx, st)
 	}

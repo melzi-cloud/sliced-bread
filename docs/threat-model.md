@@ -12,7 +12,7 @@ What SlicedBread protects against, what it does not, and where the trust boundar
 | Backup keys and encryption password | Secret `sb-system/sb-backup`, copied as `sb-backup-env` into namespaces that run backup jobs; the password is also shown once to the admin |
 | TLS private keys | Secrets in the cluster; never leave it |
 | Hetzner token in the cluster | `sb-system/sb-provider` (also `kube-system/hcloud` for the volume driver); sb-guard uses it to reset, delete and create servers of this install. It can do anything in the Hetzner project, so use a project per install |
-| Privileged operations on servers | sb-guard runs short privileged Jobs in `sb-node-ops` (a privileged Pod Security namespace only the guard uses) to check updates and reboot servers |
+| Privileged operations on servers | sb-guard runs short privileged Jobs in `sb-node-ops` (a privileged Pod Security namespace only the guard uses) to install updates (unattended-upgrade, needrestart) and reboot servers |
 | k3s join token | `sb-system/sb-join`, readable by sb-control and sb-guard; rotated once at install |
 | API tokens | Agent tokens on the user's machine (`~/.config/slicedbread`); expiring admin tokens only where an admin put them for automation; hashes in `sb-system/sb-auth` |
 | Dashboard accounts | Owner created through a one-time setup link (code hash in `sb-system/sb-setup`, deleted after use); members through invite links; bcrypt hashes in `sb-system/sb-auth` |
@@ -34,7 +34,7 @@ What SlicedBread protects against, what it does not, and where the trust boundar
 - Opportunistic scanning and exploitation of exposed internal tools (the main reason for private-by-default).
 - A compromised or malicious app trying to reach other apps, steal sessions, or take over the cluster through metadata.
 - A coding agent making a destructive or exposing change the user did not intend.
-- Losing a server (3 nodes: fenced and replaced automatically, see the node-loss test), losing app data by mistake (`sb restore`), backups that silently stopped working (restore test after every backup), and unpatched servers (unattended security upgrades, reboots one server at a time).
+- Losing a server (3 nodes: fenced and replaced automatically, see the node-loss test), losing app data by mistake (`sb restore`), backups that silently stopped working (restore test after every backup), and unpatched servers (security updates installed nightly by sb-guard after fresh, restore-tested backups, needrestart, reboots one server at a time the same night; an alert when updates are postponed or not installed for 3 days).
 
 ## Out of scope or not yet handled
 

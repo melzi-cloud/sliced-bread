@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
+	"github.com/melzi-cloud/sliced-bread/internal/guard"
 	"github.com/melzi-cloud/sliced-bread/internal/kube"
+	"github.com/melzi-cloud/sliced-bread/internal/schedule"
 )
 
 // Backups: every app with a volume or a database gets one restic snapshot per run in an
@@ -45,7 +47,20 @@ type BackupConfig struct {
 	AccessKeyID     string `json:"accessKeyId,omitempty"`
 	SecretAccessKey string `json:"secretAccessKey,omitempty"`
 	Password        string `json:"password,omitempty"` // restic repository password
-	Hour            int    `json:"hour"`               // daily backup hour, UTC
+	Hour            int    `json:"hour"`               // first backup hour of the day, UTC
+	Every           int    `json:"every,omitempty"`    // hours between backups: 6, 12, 24 or 168 (weekly)
+	Weekday         int    `json:"weekday,omitempty"`  // weekly backups: 0 Sunday ... 6 Saturday
+}
+
+// Schedule is when backups run.
+func (c BackupConfig) Schedule() schedule.Backup {
+	return schedule.Backup{Hour: c.Hour, Every: c.Every, Weekday: time.Weekday(c.Weekday)}.Normalize()
+}
+
+// setSchedule stores a schedule in the config.
+func (c *BackupConfig) setSchedule(b schedule.Backup) {
+	b = b.Normalize()
+	c.Hour, c.Every, c.Weekday = b.Hour, b.Every, int(b.Weekday)
 }
 
 // Repository returns the restic repository URL.
@@ -62,8 +77,8 @@ func (c BackupConfig) validate() error {
 		return errors.New("bucket is required and cannot contain / or spaces")
 	case c.AccessKeyID == "" || c.SecretAccessKey == "":
 		return errors.New("access key id and secret access key are required")
-	case c.Hour < 0 || c.Hour > 23:
-		return errors.New("hour must be 0-23 (UTC)")
+	case c.Schedule().Validate() != nil:
+		return c.Schedule().Validate()
 	case strings.Contains(c.Prefix, ".."):
 		return errors.New("bad prefix")
 	}
@@ -94,14 +109,16 @@ func (s *Server) backupSecret(ctx context.Context) (*BackupConfig, error) {
 		b, _ := base64.StdEncoding.DecodeString(v)
 		return string(b)
 	}
-	h, _ := strconv.Atoi(d("hour"))
-	return &BackupConfig{
+	c := &BackupConfig{
 		Endpoint: d("endpoint"), Bucket: d("bucket"), Region: d("region"), Prefix: d("prefix"),
-		AccessKeyID: d("access_key_id"), SecretAccessKey: d("secret_access_key"), Password: d("password"), Hour: h,
-	}, nil
+		AccessKeyID: d("access_key_id"), SecretAccessKey: d("secret_access_key"), Password: d("password"),
+	}
+	c.setSchedule(schedule.FromStrings(d("hour"), d("every"), d("weekday")))
+	return c, nil
 }
 
 func (s *Server) saveBackupConfig(ctx context.Context, c BackupConfig) error {
+	hour, every, weekday := c.Schedule().Strings()
 	return s.kube.Apply(ctx, kube.Obj{
 		"apiVersion": "v1", "kind": "Secret",
 		"metadata": kube.Obj{"name": backupSecret, "namespace": s.cfg.Namespace, "labels": kube.Obj{apps.ManagedByLabel: "slicedbread"}},
@@ -109,7 +126,7 @@ func (s *Server) saveBackupConfig(ctx context.Context, c BackupConfig) error {
 		"stringData": kube.Obj{
 			"endpoint": c.Endpoint, "bucket": c.Bucket, "region": c.Region, "prefix": c.Prefix,
 			"access_key_id": c.AccessKeyID, "secret_access_key": c.SecretAccessKey, "password": c.Password,
-			"hour": strconv.Itoa(c.Hour),
+			"hour": hour, "every": every, "weekday": weekday,
 		},
 	})
 }
@@ -558,11 +575,16 @@ func (s *Server) checkBackups(ctx context.Context, a *apps.App, c *BackupConfig)
 		}
 		// Apps without data are backed up too: their snapshot holds the spec, secret values
 		// and uploaded source, which is what a whole-install restore needs.
-		if c != nil && s.backupDue(ctx, a, c, time.Now().UTC()) {
-			trigger := "schedule"
+		trigger := ""
+		if c != nil && s.backupForUpdates(ctx, a) {
+			trigger = triggerBeforeUpdates
+		} else if c != nil && s.backupDue(ctx, a, c, time.Now().UTC()) {
+			trigger = "schedule"
 			if a.Backup == nil || a.Backup.LastBackup == nil {
 				trigger = "initial"
 			}
+		}
+		if trigger != "" {
 			if _, err := s.startBackupRun(ctx, a, "backup", trigger, ""); err != nil {
 				s.logf("scheduled backup %s: %v", a.Name, err)
 			}
@@ -674,12 +696,38 @@ func (s *Server) countPods(ctx context.Context, ns, app string) int {
 	return n
 }
 
-// backupDue reports whether today's scheduled backup has not run yet and the app is up.
-func (s *Server) backupDue(ctx context.Context, a *apps.App, c *BackupConfig, t time.Time) bool {
-	sched := time.Date(t.Year(), t.Month(), t.Day(), c.Hour, 0, 0, 0, time.UTC)
-	if t.Before(sched) {
-		sched = sched.Add(-24 * time.Hour)
+// triggerBeforeUpdates marks backups sb-guard asked for before installing OS updates.
+const triggerBeforeUpdates = "before OS updates"
+
+// backupForUpdates reports whether sb-guard's open request needs a backup of this app
+// before it installs OS updates. Requests older than 6 hours are stale and ignored.
+func (s *Server) backupForUpdates(ctx context.Context, a *apps.App) bool {
+	if !a.HasData() {
+		return false
 	}
+	req := guard.LoadBackupRequest(ctx, s.kube)
+	if req == nil {
+		return false
+	}
+	fresh, requested := req.Times()
+	if time.Since(requested) > 6*time.Hour {
+		return false
+	}
+	return apps.NeedsBackupForUpdates(a, fresh, requested)
+}
+
+// backupDue reports whether the latest scheduled backup has not run yet and the app is up.
+func (s *Server) backupDue(ctx context.Context, a *apps.App, c *BackupConfig, t time.Time) bool {
+	if !backupSlotOpen(a, c, t) {
+		return false
+	}
+	return s.backupSettled(ctx, a)
+}
+
+// backupSlotOpen reports whether no backup ran since the latest scheduled slot (a failed
+// one is retried hourly).
+func backupSlotOpen(a *apps.App, c *BackupConfig, t time.Time) bool {
+	sched := c.Schedule().LastSlot(t)
 	if lb := a.Backup; lb != nil && lb.LastBackup != nil {
 		if last, err := time.Parse(time.RFC3339, lb.LastBackup.StartedAt); err == nil && !last.Before(sched) {
 			// Done for today, unless it failed: then retry hourly.
@@ -688,6 +736,11 @@ func (s *Server) backupDue(ctx context.Context, a *apps.App, c *BackupConfig, t 
 			}
 		}
 	}
+	return true
+}
+
+// backupSettled reports whether an app is in a state worth backing up on schedule.
+func (s *Server) backupSettled(ctx context.Context, a *apps.App) bool {
 	// Only back up a settled app: running, latest version serving, template setup finished.
 	if st := s.status(ctx, a); st.State != "running" {
 		return false

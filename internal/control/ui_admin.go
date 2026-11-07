@@ -18,6 +18,7 @@ import (
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
 	"github.com/melzi-cloud/sliced-bread/internal/guard"
 	"github.com/melzi-cloud/sliced-bread/internal/kube"
+	"github.com/melzi-cloud/sliced-bread/internal/schedule"
 )
 
 // Admin operations are done by humans in the dashboard. API tokens, including the one
@@ -91,6 +92,14 @@ type settingsView struct {
 	BackupsConfigured bool
 	BackupTarget      string
 	BackupHour        int
+	BackupEvery       int
+	BackupWeekday     int
+	BackupSchedule    string
+	MaintenanceHour   int
+	Hours             []int
+	Frequencies       []frequencyChoice
+	Weekdays          []string
+	MaintPostponed    string
 	Password          string
 	RepoLoaded        bool
 	Repo              []*RepoApp
@@ -104,11 +113,31 @@ type settingsView struct {
 	Maint             *guard.MaintState
 }
 
+type frequencyChoice struct {
+	Every int
+	Label string
+}
+
 func (s *Server) settingsData(ctx context.Context) *settingsView {
 	v := &settingsView{OwnerEmail: s.auth.OwnerEmail(), Tokens: s.auth.Tokens(time.Now()), APIURL: "https://" + s.hosts().API(),
 		Maint: guard.LoadMaint(ctx, s.kube)}
+	sched := s.currentSchedule(ctx)
+	v.BackupHour, v.BackupEvery, v.BackupWeekday = sched.Hour, sched.Every, int(sched.Weekday)
+	v.BackupSchedule, v.MaintenanceHour = sched.String(), sched.MaintenanceHour()
+	for h := 0; h < 24; h++ {
+		v.Hours = append(v.Hours, h)
+	}
+	for _, e := range schedule.Choices {
+		v.Frequencies = append(v.Frequencies, frequencyChoice{e, schedule.FrequencyLabel(e)})
+	}
+	for d := time.Sunday; d <= time.Saturday; d++ {
+		v.Weekdays = append(v.Weekdays, d.String())
+	}
+	if m := v.Maint; m != nil && m.Postponed != nil && !m.Running {
+		v.MaintPostponed = m.Postponed.At + ": " + m.Postponed.Reason
+	}
 	if c, _ := s.backupConfig(ctx); c != nil {
-		v.BackupsConfigured, v.BackupTarget, v.BackupHour = true, strings.TrimPrefix(c.Repository(), "s3:"), c.Hour
+		v.BackupsConfigured, v.BackupTarget = true, strings.TrimPrefix(c.Repository(), "s3:")
 	}
 	if hook, err := s.webhookConfig(ctx); err == nil && hook != nil {
 		if u, err := url.Parse(hook.URL); err == nil {
@@ -156,11 +185,10 @@ func (s *Server) adminRoutes(m *http.ServeMux) {
 		s.renderSettings(w, r, email, v, "", "")
 	}))
 	m.HandleFunc("POST /settings/backups", s.adminPost(func(w http.ResponseWriter, r *http.Request, email string) {
-		hour, _ := strconv.Atoi(r.PostFormValue("hour"))
 		c := BackupConfig{Endpoint: strings.TrimSpace(r.PostFormValue("endpoint")), Bucket: strings.TrimSpace(r.PostFormValue("bucket")),
-			Region: strings.TrimSpace(r.PostFormValue("region")), Prefix: strings.TrimSpace(r.PostFormValue("prefix")), Hour: hour,
+			Region: strings.TrimSpace(r.PostFormValue("region")), Prefix: strings.TrimSpace(r.PostFormValue("prefix")),
 			AccessKeyID: strings.TrimSpace(r.PostFormValue("key")), SecretAccessKey: strings.TrimSpace(r.PostFormValue("secret"))}
-		generated, err := s.configureBackups(r.Context(), &c, true)
+		generated, err := s.configureBackups(r.Context(), &c, nil)
 		if err != nil {
 			s.renderSettings(w, r, email, nil, "", "Backups not saved: "+err.Error())
 			return
@@ -170,6 +198,18 @@ func (s *Server) adminRoutes(m *http.ServeMux) {
 			msg += " This install had no encryption password yet, so one was created: use \"Show the backup encryption password\" and save it."
 		}
 		s.renderSettings(w, r, email, nil, msg, "")
+	}))
+	m.HandleFunc("POST /settings/backup-schedule", s.adminPost(func(w http.ResponseWriter, r *http.Request, email string) {
+		b, err := scheduleFromForm(r)
+		if err == nil {
+			err = s.setBackupSchedule(r.Context(), b)
+		}
+		if err != nil {
+			s.renderSettings(w, r, email, nil, "", "Schedule not saved: "+err.Error())
+			return
+		}
+		s.logf("backup schedule set to %s by %s", b, email)
+		s.renderSettings(w, r, email, nil, fmt.Sprintf("Backups now run %s. OS maintenance runs daily at %02d:00 UTC, an hour after the first backup of the day.", b, b.MaintenanceHour()), "")
 	}))
 	m.HandleFunc("POST /settings/backup-password", s.adminPost(func(w http.ResponseWriter, r *http.Request, email string) {
 		c, err := s.backupSecret(r.Context())
@@ -255,7 +295,7 @@ func (s *Server) adminRoutes(m *http.ServeMux) {
 			return
 		}
 		s.logf("OS maintenance requested by %s", email)
-		s.renderSettings(w, r, email, nil, "OS maintenance requested: the guard starts within a minute and checks each server, rebooting those that need it one at a time.", "")
+		s.renderSettings(w, r, email, nil, "OS maintenance requested: the guard starts within a minute and checks each server. If updates are waiting, every app with data is backed up first (with a restore test), then updates install and servers that need it reboot one at a time.", "")
 	}))
 	m.HandleFunc("POST /settings/fallback", s.adminPost(func(w http.ResponseWriter, r *http.Request, email string) {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
@@ -362,6 +402,33 @@ func (s *Server) adminRoutes(m *http.ServeMux) {
 		s.logf("secret %s of %s entered by %s", key, r.PathValue("name"), email)
 		http.Redirect(w, r, "/apps/"+r.PathValue("name"), http.StatusSeeOther)
 	}))
+}
+
+func scheduleFromForm(r *http.Request) (schedule.Backup, error) {
+	hour, err1 := strconv.Atoi(r.PostFormValue("hour"))
+	every, err2 := strconv.Atoi(r.PostFormValue("every"))
+	weekday, _ := strconv.Atoi(r.PostFormValue("weekday"))
+	if err1 != nil || err2 != nil {
+		return schedule.Backup{}, errors.New("choose an hour and a frequency")
+	}
+	b := schedule.Backup{Hour: hour, Every: every, Weekday: time.Weekday(weekday)}.Normalize()
+	return b, b.Validate()
+}
+
+// setBackupSchedule changes when backups run, keeping the target and keys.
+func (s *Server) setBackupSchedule(ctx context.Context, b schedule.Backup) error {
+	if err := b.Validate(); err != nil {
+		return err
+	}
+	c, err := s.backupSecret(ctx)
+	if err != nil {
+		return err
+	}
+	if c == nil {
+		c = &BackupConfig{}
+	}
+	c.setSchedule(b)
+	return s.saveBackupConfig(ctx, *c)
 }
 
 // repositoryApps lists the apps in the backup repository.

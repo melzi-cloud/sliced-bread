@@ -3,6 +3,9 @@ package control
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
 	"github.com/melzi-cloud/sliced-bread/internal/kube"
+	"github.com/melzi-cloud/sliced-bread/internal/schedule"
 )
 
 func js(v any) string { b, _ := json.Marshal(v); return string(b) }
@@ -48,20 +52,71 @@ func TestBackupJobs(t *testing.T) {
 	}
 }
 
-func TestBackupDueWindow(t *testing.T) {
-	c := &BackupConfig{Hour: 3}
-	sched := func(t0 time.Time) time.Time {
-		s := time.Date(t0.Year(), t0.Month(), t0.Day(), c.Hour, 0, 0, 0, time.UTC)
-		if t0.Before(s) {
-			s = s.Add(-24 * time.Hour)
+func TestBackupSlotOpen(t *testing.T) {
+	at := func(v string) time.Time { x, _ := time.Parse(time.RFC3339, v); return x }
+	backedUp := func(ts, phase string) *apps.App {
+		return &apps.App{Name: "x", Backup: &apps.BackupState{LastBackup: &apps.BackupRun{StartedAt: ts, Phase: phase}}}
+	}
+	daily := &BackupConfig{Hour: 3}
+	sixHours := &BackupConfig{Hour: 3, Every: 6}
+	cases := []struct {
+		c    *BackupConfig
+		a    *apps.App
+		now  string
+		want bool
+	}{
+		{daily, &apps.App{Name: "new"}, "2026-11-07T10:00:00Z", true},
+		{daily, backedUp("2026-11-07T03:00:20Z", "succeeded"), "2026-11-07T10:00:00Z", false},
+		{daily, backedUp("2026-11-06T03:00:20Z", "succeeded"), "2026-11-07T02:59:00Z", false},
+		{daily, backedUp("2026-11-06T03:00:20Z", "succeeded"), "2026-11-07T03:00:10Z", true},
+		{sixHours, backedUp("2026-11-07T03:00:20Z", "succeeded"), "2026-11-07T08:59:00Z", false},
+		{sixHours, backedUp("2026-11-07T03:00:20Z", "succeeded"), "2026-11-07T09:00:10Z", true},
+		{sixHours, backedUp("2026-11-07T09:00:20Z", "failed"), "2026-11-07T09:30:00Z", false},
+		{sixHours, backedUp("2026-11-07T09:00:20Z", "failed"), "2026-11-07T10:01:00Z", true},
+	}
+	for i, c := range cases {
+		if got := backupSlotOpen(c.a, c.c, at(c.now)); got != c.want {
+			t.Errorf("case %d (%s at %s): %v, want %v", i, c.c.Schedule(), c.now, got, c.want)
 		}
-		return s
 	}
-	if got := sched(time.Date(2026, 11, 7, 2, 0, 0, 0, time.UTC)); got.Day() != 6 {
-		t.Fatalf("before 03:00 the window started yesterday, got %v", got)
+}
+
+func TestScheduleForm(t *testing.T) {
+	form := func(v url.Values) *http.Request {
+		r := httptest.NewRequest("POST", "/settings/backup-schedule", strings.NewReader(v.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return r
 	}
-	if got := sched(time.Date(2026, 11, 7, 4, 0, 0, 0, time.UTC)); got.Day() != 7 {
-		t.Fatalf("after 03:00 the window started today, got %v", got)
+	b, err := scheduleFromForm(form(url.Values{"hour": {"20"}, "every": {"6"}, "weekday": {"3"}}))
+	if err != nil || b != (schedule.Backup{Hour: 20, Every: 6}) || b.MaintenanceHour() != 3 {
+		t.Fatalf("%+v %v", b, err)
+	}
+	b, err = scheduleFromForm(form(url.Values{"hour": {"2"}, "every": {"168"}, "weekday": {"3"}}))
+	if err != nil || b.Weekday != time.Wednesday || b.String() != "weekly on Wednesday at 02:00 UTC" {
+		t.Fatalf("%+v %v", b, err)
+	}
+	for _, bad := range []url.Values{{"hour": {"24"}, "every": {"6"}}, {"hour": {"3"}, "every": {"5"}}, {"every": {"6"}}} {
+		if _, err := scheduleFromForm(form(bad)); err == nil {
+			t.Errorf("accepted %v", bad)
+		}
+	}
+}
+
+func TestSettingsPageShowsSchedule(t *testing.T) {
+	v := &settingsView{BackupsConfigured: true, BackupTarget: "s3/b/p", BackupHour: 20, BackupEvery: 6,
+		BackupSchedule: "every 6 hours (02:00, 08:00, 14:00, 20:00 UTC)", MaintenanceHour: 3, Hours: []int{2, 20},
+		Frequencies: []frequencyChoice{{6, "every 6 hours"}, {24, "daily"}}, Weekdays: []string{"Sunday"},
+		MaintPostponed: "2026-11-07T04:01:00Z: backup failed (vault: backup failed: denied)"}
+	var b strings.Builder
+	if err := pageTmpl.Execute(&b, pageData{Page: "settings", Email: "a@x", IsAdmin: true, Settings: v}); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, want := range []string{`<option value="20" selected>20:00</option>`, `<option value="6" selected>every 6 hours</option>`,
+		"every 6 hours (02:00, 08:00, 14:00, 20:00 UTC)", "daily at 03:00 UTC", "Updates postponed 2026-11-07T04:01:00Z"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("settings page missing %q", want)
+		}
 	}
 }
 

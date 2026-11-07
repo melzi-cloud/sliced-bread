@@ -65,12 +65,19 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 {{if .Welcome}}<p class="ok"><b>Setup complete.</b> You are the owner of this install. Save the backup encryption password sb init printed in your password manager if you have not yet. Your agent uses the <code>sb</code> CLI (already logged in on the machine that ran sb init with an agent token; elsewhere: <code>sb login --api {{.APIURL}}</code>).</p>{{end}}
 {{if $.Done}}<p class="ok">{{$.Done}}</p>{{end}}
 <h2>Backups</h2>
-{{if .BackupsConfigured}}<p>To <code>{{.BackupTarget}}</code>, daily at {{.BackupHour}}:00 UTC, each followed by a restore test.</p>{{else}}<p class="err">Not configured: app data is not backed up.</p>{{end}}
+{{if .BackupsConfigured}}<p>To <code>{{.BackupTarget}}</code>, {{.BackupSchedule}}, each followed by a restore test.</p>{{else}}<p class="err">Not configured: app data is not backed up.</p>{{end}}
 {{if $.IsAdmin}}
+<h3>Schedule</h3>
+<p class="muted">Now: {{.BackupSchedule}}. OS maintenance runs daily at {{printf "%02d" .MaintenanceHour}}:00 UTC, an hour after the first backup of the day; before it installs updates, every app with data gets a fresh backup and restore test.</p>
+<form method="post" action="/settings/backup-schedule"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+<label>Time of day (UTC) <select name="hour">{{range .Hours}}<option value="{{.}}"{{if eq . $.Settings.BackupHour}} selected{{end}}>{{printf "%02d" .}}:00</option>{{end}}</select></label>
+<label>Frequency <select name="every">{{range .Frequencies}}<option value="{{.Every}}"{{if eq .Every $.Settings.BackupEvery}} selected{{end}}>{{.Label}}</option>{{end}}</select></label>
+<label>Day (weekly only) <select name="weekday">{{range $i, $d := .Weekdays}}<option value="{{$i}}"{{if eq $i $.Settings.BackupWeekday}} selected{{end}}>{{$d}}</option>{{end}}</select></label>
+<button type="submit">Save schedule</button></form>
+<h3>Backup target</h3>
 <form method="post" action="/settings/backups"><input type="hidden" name="csrf" value="{{$.CSRF}}">
 <label>S3 endpoint (https://...)<input name="endpoint" required></label><label>Bucket<input name="bucket" required></label>
 <label>Region<input name="region" value="auto"></label><label>Prefix (optional)<input name="prefix"></label>
-<label>Hour (UTC, 0-23)<input name="hour" value="3"></label>
 <label>Access key id<input name="key" autocomplete="off" required></label><label>Secret access key<input name="secret" type="password" autocomplete="off" required></label>
 <button type="submit">{{if .BackupsConfigured}}Change backup target{{else}}Set up backups{{end}}</button></form>
 <form method="post" action="/settings/backup-password"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Show the backup encryption password</button></form>
@@ -88,9 +95,13 @@ input{padding:8px;margin:4px 0;width:100%;box-sizing:border-box} button{padding:
 <label>Format <select name="format"><option>json</option><option>slack</option><option>discord</option><option>ntfy</option></select></label>
 <button type="submit">Save webhook</button><button name="action" value="test">Send test message</button></form>{{end}}
 <h2>OS updates</h2>
-<p class="muted">Security updates install automatically on every server. Servers that need a reboot are restarted one at a time in the nightly window (an hour after backups); on 3 servers, apps without a volume keep serving, apps with a volume pause for about a minute while it moves.</p>
-{{if .Maint}}{{with .Maint}}<p>Last run: {{if .LastRun}}{{.LastRun}}{{else}}never{{end}}{{if .Running}} (running now){{end}}</p>
-<table>{{range $n, $m := .Nodes}}<tr><td>{{$n}}</td><td class="muted">checked {{$m.CheckedAt}}{{if $m.Kernel}}, kernel {{$m.Kernel}}{{end}}{{if $m.LastRebootAt}}, last reboot {{$m.LastRebootAt}} (away {{$m.LastRebootFor}}){{end}}{{if $m.RebootNeeded}}, <b>reboot pending</b>{{end}}{{if $m.Error}}, <span class="err">{{$m.Error}}</span>{{end}}</td></tr>{{end}}</table>{{end}}{{end}}
+<p class="muted">Security updates install every night at {{printf "%02d" .MaintenanceHour}}:00 UTC, an hour after the first backup of the day, one server at a time. Before anything installs, every app with data needs a backup from the last 3 hours with a passed restore test; missing ones run first, and a failed backup postpones the updates. Services using replaced libraries are restarted (needrestart), and a server that needs a reboot (a new kernel) is rebooted the same night; on 3 servers, apps without a volume keep serving, apps with a volume pause for about a minute while it moves.</p>
+{{if .MaintPostponed}}<p class="err">Updates postponed {{.MaintPostponed}}</p>{{end}}
+{{if .Maint}}{{with .Maint}}<p>Last run: {{if .LastRun}}{{.LastRun}}{{else}}never{{end}}{{if .Running}} (running now{{if .Phase}}: {{.Phase}}{{end}}){{end}}{{if .LastUpdated}} &middot; updates last installed {{.LastUpdated}}{{end}}</p>
+{{if .Running}}{{with .Backups}}{{if .Waiting}}<p class="muted">Waiting for backups: {{range .Waiting}}{{.}}; {{end}}</p>{{end}}{{end}}{{end}}
+<table>{{range $n, $m := .Nodes}}<tr><td>{{$n}}</td><td class="muted">checked {{$m.CheckedAt}}{{if $m.Kernel}}, kernel {{$m.Kernel}}{{end}}{{if $m.PendingPkgs}}, waiting: {{$m.PendingPkgs}}{{end}}{{if $m.InstalledAt}}, installed {{$m.InstalledAt}}: {{$m.Installed}}{{if $m.Restarted}} (restarted {{$m.Restarted}}){{end}}{{end}}{{if $m.LastRebootAt}}, last reboot {{$m.LastRebootAt}} (away {{$m.LastRebootFor}}){{end}}{{if $m.RebootNeeded}}, <b>reboot pending</b>{{end}}{{if $m.Error}}, <span class="err">{{$m.Error}}</span>{{end}}</td></tr>{{end}}</table>
+{{if .Log}}<details><summary class="muted">Log</summary><pre style="font-size:12px;white-space:pre-wrap">{{range .Log}}{{.}}
+{{end}}</pre></details>{{end}}{{end}}{{end}}
 {{if $.IsAdmin}}<form method="post" action="/settings/maintenance"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Run OS maintenance now</button></form>{{end}}
 <h2>Certificates</h2>
 <p>{{.Fallback}}</p>

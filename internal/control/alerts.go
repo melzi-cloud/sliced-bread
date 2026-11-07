@@ -34,6 +34,7 @@ const (
 	firstBackupGrace = 3 * time.Hour
 	backupMaxAge     = 26 * time.Hour
 	certRenewWarning = 14 * 24 * time.Hour
+	updatesMaxAge    = 72 * time.Hour
 )
 
 // Alert is one open problem.
@@ -174,6 +175,17 @@ func (s *Server) alertConditions(ctx context.Context, list []*apps.App, bc *Back
 				add(condition{Alert{ID: "maintenance/" + name, Severity: "warning",
 					Title: "OS maintenance on server " + name + " failed", Detail: nm.Error, Hint: "dashboard Settings: Run OS maintenance now, to retry"}, 0})
 			}
+		}
+		if p := m.Postponed; p != nil && !m.Running {
+			add(condition{Alert{ID: "maintenance-postponed", Severity: "warning",
+				Title:  "OS security updates were postponed: " + p.Reason,
+				Detail: "Updates only install after every app with data has a fresh backup with a passed restore test. Postponed at " + p.At + ".",
+				Hint:   "fix the backup (sb backups), then dashboard Settings: Run OS maintenance now"}, 0})
+		}
+		if lu, err := time.Parse(time.RFC3339, m.LastUpdated); err == nil && now.Sub(lu) > updatesMaxAge {
+			add(condition{Alert{ID: "updates-overdue", Severity: "warning",
+				Title: "OS security updates have not been installed since " + m.LastUpdated,
+				Hint:  "dashboard Settings: OS updates shows the last runs; Run OS maintenance now to retry"}, 0})
 		}
 	}
 	if certs, err := s.kube.List(ctx, "cert-manager.io/v1", "Certificate", "", ""); err == nil {

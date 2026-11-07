@@ -165,7 +165,7 @@ When the user wants off-the-shelf software that has no template, you can write o
 
 Templates that keep data (Vaultwarden, Umami's Postgres) use persistent volumes that survive restarts and redeploys. Deleting an app deletes its data.
 
-When backups are configured (`sb backups` says so), every app with a volume or database is backed up daily, and **each backup is followed by a restore test** that restores it into a scratch namespace and checks it. New apps get their first backup soon after they are ready.
+When backups are configured (`sb backups` says so), every app with a volume or database is backed up on the schedule an admin sets in the dashboard (daily at 03:00 UTC unless changed; `sb backups` shows it), and **each backup is followed by a restore test** that restores it into a scratch namespace and checks it. New apps get their first backup soon after they are ready.
 
 ```sh
 sb backups                 # target, schedule, per app: last backup and last restore test
@@ -208,7 +208,7 @@ The dashboard at `https://auth.<tenant-domain>/` shows the same list. Each alert
 
 ## Maintenance
 
-The install patches itself: security updates install automatically and servers reboot one at a time at night; on 3 servers a dead server is replaced automatically. `sb status <app>` shows `update:` when a newer upstream version of a template's image exists; it is not applied automatically, so mention it to the user rather than redeploying. Alerts about server replacement or failed maintenance appear in `sb alerts`.
+The install patches itself: every night, after a fresh backup and restore test of every app with data, security updates install, services using replaced libraries restart, and servers that need it reboot one at a time; a failed backup postpones the updates and opens an alert; on 3 servers a dead server is replaced automatically. `sb status <app>` shows `update:` when a newer upstream version of a template's image exists; it is not applied automatically, so mention it to the user rather than redeploying. Alerts about server replacement or failed maintenance appear in `sb alerts`.
 
 ## Installing
 
