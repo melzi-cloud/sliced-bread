@@ -16,17 +16,17 @@ The first goal is a working demo of three flows:
 | M3 | Login wall | Forward-auth, cookie stripping, access modes, public paths. **Done 2026-11-06**, verified live, plus approvals and browser-based CLI login |
 | M4 | Templates | Vaultwarden and Umami pass the verification workflow. **Templates done 2026-11-06**; the automated verification workflow is not built yet (checked by hand and by agent tests) |
 | M5 | Agent interface | MCP server, CLI, `AGENTS.md`. Demo 3 works end to end with Claude Code or Cursor. **CLI and skill file done 2026-11-06**, tested by agents given only the skill file. MCP server not built |
-| M6 | Recovery | Nightly backups, nightly restore tests with alerts, node replacement. **Backups and restore tests done 2026-11-06** (restic to S3, a restore test after every backup, `sb restore`, verified live with Vaultwarden and Umami). Alerts and node replacement open |
+| M6 | Recovery | Nightly backups, nightly restore tests with alerts, node replacement. **Done 2026-11-06**: backups and restore tests, alerts, node replacement (sb-guard), OS patching. **Backups and restore tests done 2026-11-06** (restic to S3, a restore test after every backup, `sb restore`, verified live with Vaultwarden and Umami). Alerts and node replacement open |
 | M7 | Self-hosted release (D-021) | `sb init` on the user's Hetzner account and domain, 1 or 3 nodes, `sb upgrade`, `sb export`, `sb destroy`. **Done 2026-11-06**, both sizes tested on Hetzner |
 
 M6 is required before any real data, including our own Vaultwarden, moves onto the platform.
 
 ## Acceptance tests
 
-1. Hard-kill a node: every app is back within the recovery target with no data loss.
+1. Hard-kill a node: every app is back within the recovery target with no data loss. **Done 2026-11-06** (`make e2e-node-loss`: apps back within 5 minutes, replacement server joined after about 3, no data loss; see README).
 2. Delete an app: one command brings it back from backup (`sb restore <app> --recreate`). **Done 2026-11-06.** A whole install is rebuilt into a new one from its bucket (`sb init` with `SB_BACKUP_PASSWORD`, then "Recreate all" in the dashboard). **Done 2026-11-06.**
 3. Corrupt a Postgres table: point-in-time recovery brings it back.
-4. Patch day: OS updates and reboots happen with no manual steps and no user-visible downtime.
+4. Patch day: OS updates and reboots happen with no manual steps and no user-visible downtime. **Done 2026-11-06 for apps without a volume and the login wall** (three servers rebooted one at a time, probes every 2 seconds saw no failure for them); apps with a volume pause for about a minute while it moves, until volumes or databases are replicated.
 5. A bad image update rolls back automatically.
 6. Without a session, every `wall` app returns the login wall. Only declared public paths bypass it. A port scan of the tenant shows only 80/443.
 7. A compromised app cannot read the session cookie or reach another app's database.

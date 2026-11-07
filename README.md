@@ -49,8 +49,8 @@ Hetzner prices in nbg1 including VAT, checked 2026-11-06 (cx23: 2 vCPU, 4 GB RAM
 
 | Size | What you get | About |
 |---|---|---|
-| `--size 1` | 1 server, ports 80/443 open on it. App data on Hetzner volumes (they survive the server, but nothing moves them). No high availability: if the server fails, apps are down until it is back or restored from backup. | EUR 7/month |
-| `--size 3` | 3 servers in a spread placement group (different physical hosts), a load balancer, embedded etcd that survives losing one server. App data on Hetzner volumes that can move to another server. | EUR 29/month |
+| `--size 1` | 1 server, ports 80/443 open on it. App data on Hetzner volumes (they survive the server, but nothing moves them). No high availability: if the server fails, apps are down until it is back or restored from backup, and the nightly OS reboot takes apps down for a minute or two. | EUR 7/month |
+| `--size 3` | 3 servers in a spread placement group (different physical hosts), a load balancer, embedded etcd that survives losing one server, two copies of the login wall. A dead server is replaced automatically (in the node-loss test, apps were serving again within 5 minutes and a new server had joined after about 3); OS reboots happen one server at a time without downtime for apps without a volume. | EUR 29/month |
 | per app with data | each volume or database is a 10 GB Hetzner volume | EUR 0.77/month |
 
 Backup storage is billed by your S3 provider. Restic deduplicates and compresses, so small apps use little space.
@@ -62,19 +62,34 @@ Backup storage is billed by your S3 provider. Restic deduplicates and compresses
 - **Private by default:** every app sits behind a login wall unless you say otherwise. Apps with their own clients (Vaultwarden) opt out. Session cookies are host-only and never reach apps.
 - **Backups that are proven:** daily restic backups of volumes and Postgres to your bucket, each followed by a restore test into a scratch namespace: restic verifies every restored file's content, the file count must match, required files must be present (Vaultwarden's database), and a database dump must load into a fresh Postgres with the same tables. `sb restore` replaces an app's data with a snapshot, and `sb restore <app> --recreate` brings back a deleted app (spec, secrets, source and data) from the bucket alone.
 - **Tells you when something breaks:** failed backups or restore tests, apps that stay down, certificates that don't renew and servers that disappear show on the dashboard and in `sb alerts`, and can be posted to a webhook (Slack, Discord, ntfy or JSON) when they open and when they clear.
+- **Maintains itself:** Debian security updates install automatically. Servers that need a reboot are restarted one at a time in a nightly window, after their apps have moved: apps without a volume keep serving, apps with a volume pause for under a minute. Newer upstream versions of template images are reported (not applied). On 3 servers, a server that dies is fenced and replaced by a new one with no manual steps.
 - **Agent-friendly:** a CLI with JSON output and documented exit codes, a skill file, and human approvals for anything that widens exposure, deletes or restores.
 - **Your account, your keys:** certificates are issued and kept inside your cluster, and traffic never passes through us. The dashboard exports every app as plain Kubernetes manifests.
 
 ## Known gaps
 
-- No automatic OS patching, node replacement or rollback of bad image updates yet.
+- Image updates are reported, not applied; no automatic rollback of a bad update yet.
+- Apps with a volume or database (one Postgres instance per app) pause for about a minute when their server reboots or dies, while the volume moves.
+- Kubernetes (k3s) itself is not upgraded automatically yet.
 - Alerts go to the dashboard, `sb alerts` and one webhook (JSON, Slack, Discord or ntfy). No email yet.
 - Apps run as root inside their containers (capabilities reduced, privilege escalation off).
 - The in-cluster image registry has no login. App pods cannot reach it (network policy) and apps run images by digest, but build pods can push to it.
-- One Postgres instance per app (no replica). On `--size 3` it moves with its volume when a server fails; on `--size 1` it is down with the server.
 - Login is email and password. Teammates join through invite links you send yourself (no email sending, no GitHub sign-in yet).
 - A restore test checks that Vaultwarden's SQLite file is present, not its internal integrity.
 - Hetzner and Cloudflare only.
+
+## Recovery, measured
+
+`make e2e-node-loss` powers off, through the Hetzner API, the server running Vaultwarden on a 3-server install with Vaultwarden and Umami in use, and measures until each app serves again. In the latest run (2026-11-06) that server also ran Umami's database, the database operator and one of the two control-plane replicas:
+
+| | Back after |
+|---|---|
+| Dashboard and login wall | 2 min 3 s |
+| Replacement server joined | 3 min 9 s |
+| Vaultwarden | 4 min 5 s |
+| Umami (through its database) | 4 min 59 s |
+
+No data was lost, including a Vaultwarden account created seconds before the power-off. Most of the time is spent moving Hetzner volumes to another server.
 
 ## Docs
 

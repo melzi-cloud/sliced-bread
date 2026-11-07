@@ -199,6 +199,10 @@ sb alerts        # open alerts: failed backups or restore tests, apps down for 1
 
 The dashboard at `https://auth.<tenant-domain>/` shows the same list. Each alert has a `next:` hint with the command to investigate. Check `sb alerts` at the start of operational work and after finishing a task; report open alerts to the user. Admins can send alerts to a webhook (Slack, Discord, ntfy or JSON) on the dashboard's Settings page.
 
+## Maintenance
+
+The install patches itself: security updates install automatically and servers reboot one at a time at night; on 3 servers a dead server is replaced automatically. `sb status <app>` shows `update:` when a newer upstream version of a template's image exists; it is not applied automatically, so mention it to the user rather than redeploying. Alerts about server replacement or failed maintenance appear in `sb alerts`.
+
 ## Installing
 
 Only when the user asks for a new install. It runs from the user's machine against their own Hetzner account and Cloudflare domain:

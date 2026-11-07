@@ -339,6 +339,9 @@ func (g *Guard) rebootNode(ctx context.Context, info *tenant.ClusterInfo, node s
 		}
 		if b := bootID(n); b != "" && b != oldBoot && nodeViews([]kube.Obj{n})[0].Ready {
 			took := time.Since(start)
+			// Ready comes before the pod network and service rules have settled; the load
+			// balancer only checks that the port accepts connections, so give it a moment.
+			time.Sleep(45 * time.Second)
 			finish()
 			time.Sleep(settleAfterReboot)
 			return took, nil
