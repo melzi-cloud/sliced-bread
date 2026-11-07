@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
+	"github.com/melzi-cloud/sliced-bread/internal/kube"
 )
 
 func js(v any) string { b, _ := json.Marshal(v); return string(b) }
@@ -110,6 +111,58 @@ func TestRenderPausedScalesToZero(t *testing.T) {
 	for _, o := range objs {
 		if o["kind"] == "Deployment" && !strings.Contains(js(o), `"replicas":0`) {
 			t.Fatal("paused app must have 0 replicas")
+		}
+	}
+}
+
+func TestBuildJobIsRootlessAndRecordsDigest(t *testing.T) {
+	a := &apps.App{Name: "crm", Upload: &apps.Upload{ID: "u1"}}
+	j := js(buildJob(Config{RegistryPush: "reg:5000", BuildNamespace: "sb-builds", RailpackVersion: "v1"}, a, "b1", "reg:5000/crm:b1", "http://x"))
+	for _, want := range []string{BuildkitRootlessImage, `"runAsUser":1000`, `"runAsNonRoot":true`, "buildctl-daemonless.sh", "--metadata-file", "SB_DIGEST", `"value":"reg:5000/crm:buildcache"`, "--oci-worker-no-process-sandbox"} {
+		if !strings.Contains(j, want) {
+			t.Errorf("build job missing %s", want)
+		}
+	}
+	if strings.Contains(j, `"privileged":true`) {
+		t.Error("build job must not be privileged")
+	}
+}
+
+func TestRegistryPolicyAndKeep(t *testing.T) {
+	nodes := []kube.Obj{{
+		"spec":   map[string]any{"podCIDR": "10.42.1.0/24"},
+		"status": map[string]any{"addresses": []any{map[string]any{"type": "InternalIP", "address": "10.0.1.2"}, map[string]any{"type": "Hostname", "address": "n1"}}},
+	}}
+	src := nodeSources(nodes)
+	if strings.Join(src, " ") != "10.0.1.2 10.42.1.0 10.42.1.1" {
+		t.Fatalf("sources %v", src)
+	}
+	p := js(registryPolicyObj(src))
+	for _, want := range []string{`"cidr":"10.42.1.1/32"`, `"kubernetes.io/metadata.name":"sb-builds"`, `"app":"sb-registry"`} {
+		if !strings.Contains(p, want) {
+			t.Errorf("policy missing %s", want)
+		}
+	}
+	if strings.Contains(p, "10.42.0.0/16") {
+		t.Error("policy must not admit the whole pod network")
+	}
+	keep := registryKeep([]*apps.App{
+		{Name: "crm", Build: &apps.BuildState{Image: "sb-registry.local:5000/crm:b2@sha256:aa", LastGood: "sb-registry.local:5000/crm:b1@sha256:bb"}},
+		{Name: "img", Image: "nginx:1"},
+	})
+	if keepSpec(keep) != "crm=b1,b2,buildcache,sha256:aa,sha256:bb" {
+		t.Fatalf("keep %q", keepSpec(keep))
+	}
+}
+
+func TestBuildIDFromImage(t *testing.T) {
+	for in, want := range map[string]string{
+		"sb-registry.local:5000/crm:b1@sha256:abc": "b1",
+		"sb-registry.local:5000/crm:b1":            "b1",
+		"sb-registry.local:5000/crm":               "",
+	} {
+		if got := buildIDFromImage(in); got != want {
+			t.Errorf("%s: %q, want %q", in, got, want)
 		}
 	}
 }

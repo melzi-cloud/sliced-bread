@@ -230,17 +230,27 @@ else
   "$RP" prepare . --plan-out /work/plan/railpack-plan.json --info-out /work/plan/info.json
   echo railpack > /work/plan/mode
 fi
+# The build container runs rootless as uid 1000.
+chmod -R a+rwX /work
 `
+	// Each build runs its own rootless BuildKit (no shared daemon, no privileges); the
+	// layer cache lives in the registry per app, so builds stay fast without sharing state.
 	build := `set -eu
 cd "/work/src/$SB_PATH"
+CACHE="type=registry,ref=$SB_CACHE,registry.insecure=true"
 if [ "$(cat /work/plan/mode)" = dockerfile ]; then
-  buildctl --addr "$SB_BUILDKIT" build --progress plain --frontend dockerfile.v0 --local context=. --local dockerfile=. \
-    --output "type=image,name=$SB_IMAGE,push=true,registry.insecure=true"
+  set -- --frontend dockerfile.v0 --local context=. --local dockerfile=.
 else
-  buildctl --addr "$SB_BUILDKIT" build --progress plain --frontend gateway.v0 --opt "source=ghcr.io/railwayapp/railpack-frontend:$SB_RAILPACK" \
-    --local context=. --local dockerfile=/work/plan --output "type=image,name=$SB_IMAGE,push=true,registry.insecure=true"
+  set -- --frontend gateway.v0 --opt "source=ghcr.io/railwayapp/railpack-frontend:$SB_RAILPACK" --local context=. --local dockerfile=/work/plan
 fi
+buildctl-daemonless.sh build --progress plain "$@" \
+  --import-cache "$CACHE" --export-cache "$CACHE,mode=max" \
+  --output "type=image,name=$SB_IMAGE,push=true,registry.insecure=true" \
+  --metadata-file /work/plan/metadata.json
+digest=$(sed -n 's/.*"containerimage.digest": *"\(sha256:[0-9a-f]*\)".*/\1/p' /work/plan/metadata.json | head -n1)
+if [ -z "$digest" ]; then echo "SB_ERROR build did not report an image digest"; exit 1; fi
 echo "pushed $SB_IMAGE"
+echo "SB_DIGEST $digest"
 `
 	repo, branch, path := "", "", "."
 	if a.Repo != nil {
@@ -255,10 +265,12 @@ echo "pushed $SB_IMAGE"
 		kube.Obj{"name": "SB_BRANCH", "value": branch},
 		kube.Obj{"name": "SB_PATH", "value": path},
 		kube.Obj{"name": "SB_RAILPACK", "value": cfg.RailpackVersion},
-		kube.Obj{"name": "SB_BUILDKIT", "value": cfg.BuildkitAddr},
 		kube.Obj{"name": "SB_IMAGE", "value": pushRef},
+		kube.Obj{"name": "SB_CACHE", "value": cfg.RegistryPush + "/" + a.Name + ":" + BuildCacheTag},
+		kube.Obj{"name": "BUILDKITD_FLAGS", "value": "--oci-worker-no-process-sandbox"},
 	}
 	mounts := []any{kube.Obj{"name": "work", "mountPath": "/work"}}
+	buildMounts := []any{kube.Obj{"name": "work", "mountPath": "/work"}, kube.Obj{"name": "buildkit", "mountPath": "/home/user/.local/share/buildkit"}}
 	return kube.Obj{
 		"apiVersion": "batch/v1", "kind": "Job",
 		"metadata": kube.Obj{
@@ -280,16 +292,29 @@ echo "pushed $SB_IMAGE"
 						"securityContext": kube.Obj{"allowPrivilegeEscalation": false},
 					}},
 					"containers": []any{kube.Obj{
-						"name": "build", "image": "moby/buildkit:v0.34.2", "command": []any{"sh", "-c", build},
-						"env": env, "volumeMounts": mounts,
-						"securityContext": kube.Obj{"allowPrivilegeEscalation": false},
+						"name": "build", "image": BuildkitRootlessImage, "command": []any{"sh", "-c", build},
+						"env": env, "volumeMounts": buildMounts,
+						// Rootless BuildKit: non-root, not privileged. It needs unconfined seccomp and
+						// AppArmor to create the user namespace its build steps run in.
+						"securityContext": kube.Obj{
+							"runAsUser": 1000, "runAsGroup": 1000, "runAsNonRoot": true,
+							"seccompProfile":  kube.Obj{"type": "Unconfined"},
+							"appArmorProfile": kube.Obj{"type": "Unconfined"},
+						},
+						"resources": kube.Obj{"requests": kube.Obj{"cpu": "250m", "memory": "512Mi"}, "limits": kube.Obj{"memory": "3Gi"}},
 					}},
-					"volumes": []any{kube.Obj{"name": "work", "emptyDir": kube.Obj{}}},
+					"volumes": []any{kube.Obj{"name": "work", "emptyDir": kube.Obj{}}, kube.Obj{"name": "buildkit", "emptyDir": kube.Obj{}}},
 				},
 			},
 		},
 	}
 }
+
+// BuildkitRootlessImage builds every app in its own pod.
+const BuildkitRootlessImage = "moby/buildkit:v0.34.2-rootless"
+
+// BuildCacheTag holds each app's BuildKit layer cache in the registry.
+const BuildCacheTag = "buildcache"
 
 func (s *Server) buildJobName(a *apps.App) string { return "build-" + a.Name + "-" + a.Build.ID }
 
@@ -308,6 +333,14 @@ func (s *Server) checkBuild(ctx context.Context, a *apps.App) bool {
 	}
 	switch {
 	case kube.Num(job, "status", "succeeded") > 0:
+		digest := s.runOutput(ctx, s.cfg.BuildNamespace, s.buildJobName(a))["SB_DIGEST"]
+		if !strings.HasPrefix(digest, "sha256:") {
+			a.Build.Phase, a.Build.FinishedAt = "failed", time.Now().UTC().Format(time.RFC3339)
+			a.Build.Message = "build finished without an image digest; see: sb logs " + a.Name + " --build"
+			return true
+		}
+		// Deploy by digest: overwriting the tag in the registry cannot change what runs.
+		a.Build.Image = strings.SplitN(a.Build.Image, "@", 2)[0] + "@" + digest
 		a.Build.Phase = "succeeded"
 		a.Build.LastGood = a.Build.Image
 		a.Build.Message = ""
@@ -357,6 +390,8 @@ func (s *Server) tick(ctx context.Context) {
 	if err != nil {
 		s.logf("tick: backup config: %v", err)
 	}
+	s.ensureRegistryPolicy(ctx)
+	s.maybeRegistryGC(ctx, list)
 	for _, a := range list {
 		s.mu.Lock()
 		cur, err := s.getApp(ctx, a.Name)
@@ -551,7 +586,8 @@ func servingImage(dep kube.Obj) string {
 }
 
 func buildIDFromImage(img string) string {
-	if i := strings.LastIndex(img, ":"); i >= 0 {
+	img = strings.SplitN(img, "@", 2)[0] // drop the digest
+	if i := strings.LastIndex(img, ":"); i >= 0 && !strings.Contains(img[i:], "/") {
 		return img[i+1:]
 	}
 	return ""

@@ -426,7 +426,7 @@ func (s *Server) runOutput(ctx context.Context, ns, job string) map[string]strin
 		return out
 	}
 	name := kube.Str(pods[0], "metadata", "name")
-	for _, c := range []string{"dump", "restore", "restic", "check", "database"} {
+	for _, c := range []string{"dump", "restore", "restic", "check", "database", "build"} {
 		l, err := s.kube.Logs(ctx, ns, name, c, 200)
 		if err != nil {
 			continue

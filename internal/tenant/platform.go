@@ -8,7 +8,6 @@ import (
 const (
 	CNPGChartVersion = "0.29.1"
 	RegistryImage    = "registry:3.1.2"
-	BuildkitImage    = "moby/buildkit:v0.34.2"
 	RailpackVersion  = "v0.43.0"
 	RegistryIP       = "10.43.200.200"
 	RegistryPullHost = "sb-registry.local:5000"
@@ -213,7 +212,8 @@ spec:
           image: ` + RegistryImage + `
           ports: [{containerPort: 5000}]
           env:
-            - {name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true"}
+            # No deletes through the API; sb-control's garbage collection job cleans up on disk.
+            - {name: REGISTRY_STORAGE_DELETE_ENABLED, value: "false"}
           volumeMounts: [{name: data, mountPath: /var/lib/registry}]
           readinessProbe:
             httpGet: {path: /v2/, port: 5000}
@@ -231,54 +231,15 @@ spec:
   selector: {app: sb-registry}
   ports: [{port: 5000, targetPort: 5000}]
 ---
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: buildkitd
-  namespace: sb-builds
-spec:
-  replicas: 1
-  selector:
-    matchLabels: {app: buildkitd}
-  template:
-    metadata:
-      labels: {app: buildkitd}
-    spec:
-      containers:
-        - name: buildkitd
-          image: ` + BuildkitImage + `
-          args: ["--addr", "tcp://0.0.0.0:1234", "--addr", "unix:///run/buildkit/buildkitd.sock"]
-          ports: [{containerPort: 1234}]
-          securityContext: {privileged: true}
-          readinessProbe:
-            exec: {command: ["buildctl", "debug", "workers"]}
-            periodSeconds: 10
-          volumeMounts: [{name: cache, mountPath: /var/lib/buildkit}]
-          resources:
-            requests: {cpu: 200m, memory: 256Mi}
-      volumes:
-        - name: cache
-          emptyDir: {}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: buildkitd
-  namespace: sb-builds
-spec:
-  selector: {app: buildkitd}
-  ports: [{port: 1234, targetPort: 1234}]
----
+# Builds run as one-off Jobs with their own rootless BuildKit; nothing needs to reach them.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: buildkitd-only-builds
+  name: deny-ingress
   namespace: sb-builds
 spec:
-  podSelector: {matchLabels: {app: buildkitd}}
+  podSelector: {}
   policyTypes: [Ingress]
-  ingress:
-    - from: [{podSelector: {}}]
 ---
 apiVersion: helm.cattle.io/v1
 kind: HelmChart

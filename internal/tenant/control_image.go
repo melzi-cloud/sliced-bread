@@ -153,11 +153,14 @@ func (p *Provisioner) DeployControl(ctx context.Context, st *State, repoRoot, ad
 	if _, err := st.Kubectl(ctx, "apply -f -", []byte(m)); err != nil {
 		return fmt.Errorf("apply platform: %w", err)
 	}
+	// Remove components older versions installed (the shared privileged BuildKit daemon).
+	if _, err := st.Kubectl(ctx, "-n sb-builds delete deployment/buildkitd service/buildkitd networkpolicy/buildkitd-only-builds --ignore-not-found", nil); err != nil {
+		return fmt.Errorf("remove old buildkitd: %w", err)
+	}
 	p.Logf("[%s] waiting for platform components", st.RunID)
 	return poll(ctx, 10*time.Minute, 10*time.Second, func(ctx context.Context) (bool, error) {
 		_, err := st.Kubectl(ctx, "-n sb-system rollout status deploy/sb-control --timeout=15s && "+
 			"k3s kubectl -n sb-system rollout status deploy/sb-registry --timeout=15s && "+
-			"k3s kubectl -n sb-builds rollout status deploy/buildkitd --timeout=15s && "+
 			"k3s kubectl -n cnpg-system rollout status deploy/cloudnative-pg --timeout=15s", nil)
 		return err == nil, nil
 	})

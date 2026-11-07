@@ -61,7 +61,7 @@ Backup storage is billed by your S3 provider. Restic deduplicates and compresses
 - No automatic OS patching, node replacement or rollback of bad image updates yet.
 - No alerting: a failed backup or restore test shows in `sb backups` and `sb status`, but nothing notifies you.
 - Apps run as root inside their containers (capabilities reduced, privilege escalation off).
-- The in-cluster image registry has no authentication.
+- The in-cluster image registry has no login. App pods cannot reach it (network policy) and apps run images by digest, but build pods can push to it.
 - One Postgres instance per app (no replica). On `--size 3` it moves with its volume when a server fails; on `--size 1` it is down with the server.
 - Login is email and password for one admin account. No GitHub login or team members yet, so "private" means only you.
 - A restore test checks that Vaultwarden's SQLite file is present, not its internal integrity.

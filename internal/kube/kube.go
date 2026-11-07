@@ -143,6 +143,7 @@ var resources = map[string]resource{
 	"v1/Service":                         {"", "v1", "services", true},
 	"v1/PersistentVolumeClaim":           {"", "v1", "persistentvolumeclaims", true},
 	"v1/Pod":                             {"", "v1", "pods", true},
+	"v1/Node":                            {"", "v1", "nodes", false},
 	"v1/Event":                           {"", "v1", "events", true},
 	"apps/v1/Deployment":                 {"apps", "v1", "deployments", true},
 	"apps/v1/ReplicaSet":                 {"apps", "v1", "replicasets", true},

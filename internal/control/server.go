@@ -64,6 +64,10 @@ type Server struct {
 	devices deviceStore
 	mu      sync.Mutex // serialises writes to app specs
 	logf    func(string, ...any)
+
+	registryPolicyKey string
+	registryPolicyAt  time.Time
+	registryGCAt      time.Time
 }
 
 // New creates a server and loads or bootstraps auth state.

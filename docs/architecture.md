@@ -30,7 +30,7 @@ Status: draft, 2026-11-06. Decisions referenced as D-NNN live in [decisions.md](
  │  MCP server, CLI backend              │ pull│   (outbound only)   auth proxy ──► apps       │
  │  renders manifests per tenant         │     │                                              │
  └───────────────────────────────────────┘     │  CNPG Postgres, Hetzner Volumes (CSI)         │
-                                               │  BuildKit + Railpack builders                 │
+                                               │  Build jobs: rootless BuildKit + Railpack     │
                                                │  backups ──► object storage (other location)  │
                                                └──────────────────────────────────────────────┘
 ```
@@ -135,4 +135,4 @@ What is built today, and where it differs from the target design above:
 | Databases | CloudNativePG, one instance per app. No backups yet. |
 | Backups and restore tests | Not built (M6). Do not put real data on a prototype tenant. |
 | Node replacement, patching | Not built. Debian unattended upgrades are not enabled yet. |
-| Known gaps | Apps run as root in containers with all capabilities dropped (Pod Security `baseline`, warn on `restricted`). The in-cluster registry has no authentication. Pods can read Hetzner metadata (user data). |
+| Known gaps | Apps run as root in containers with all capabilities dropped (Pod Security `baseline`, warn on `restricted`). The in-cluster registry has no login (only build pods and nodes can reach it; apps run by digest). Build pods run with unconfined seccomp and AppArmor for rootless BuildKit. |
