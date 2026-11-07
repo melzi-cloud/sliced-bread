@@ -21,7 +21,8 @@ help:
 	@echo "make control-push RUN=<run-id>   rebuild sb-control and roll it out"
 
 test:
-	go vet ./...
+	@test -z "$$(gofmt -l .)" || (echo "gofmt needed:"; gofmt -l .; exit 1)
+	go vet ./... && go vet -tags e2e ./...
 	go test ./...
 
 # Release-style build: sb with the linux/amd64 sb-control embedded.
