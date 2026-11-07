@@ -46,6 +46,7 @@ func (c *client) runBackupCmd(cmd string, fs *flag.FlagSet, rest []string, jsonO
 			Configured bool   `json:"configured"`
 			Target     string `json:"target"`
 			Schedule   string `json:"schedule"`
+			NextBackup string `json:"nextBackup"`
 			Hint       string `json:"hint"`
 			Apps       []struct {
 				Name    string `json:"name"`
@@ -67,6 +68,9 @@ func (c *client) runBackupCmd(cmd string, fs *flag.FlagSet, rest []string, jsonO
 		}
 		fmt.Println("target:  ", v.Target)
 		fmt.Println("schedule:", v.Schedule)
+		if v.NextBackup != "" {
+			fmt.Println("next backup:", v.NextBackup)
+		}
 		fmt.Println("encryption password: held by the user and shown only in the dashboard (Settings); agents never see it")
 		for _, a := range v.Apps {
 			fmt.Printf("%s: %s\n", a.Name, a.Summary)

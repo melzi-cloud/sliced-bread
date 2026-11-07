@@ -59,6 +59,7 @@ const (
 type MaintState struct {
 	Requested   string               `json:"requested,omitempty"` // set by the dashboard: run now
 	LastRun     string               `json:"lastRun,omitempty"`
+	NextRun     string               `json:"nextRun,omitempty"` // next scheduled window, from the backup schedule
 	Running     bool                 `json:"running,omitempty"`
 	Phase       string               `json:"phase,omitempty"` // checking, backups, updating
 	Backups     *BackupWait          `json:"backups,omitempty"`
@@ -202,6 +203,17 @@ func maintenanceDue(st *MaintState, hour int, now time.Time) bool {
 	return !now.Before(window) && now.Before(window.Add(2*time.Hour)) && last.Before(window)
 }
 
+// nextMaintenance is the start of the next window maintenanceDue will open: today's
+// window if it has not run yet (or is still open), otherwise tomorrow's.
+func nextMaintenance(st *MaintState, hour int, now time.Time) time.Time {
+	last, _ := time.Parse(time.RFC3339, st.LastRun)
+	w := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, time.UTC)
+	if !last.Before(w) || !now.Before(w.Add(2*time.Hour)) {
+		w = w.Add(24 * time.Hour)
+	}
+	return w
+}
+
 // maybeMaintain starts a maintenance cycle when due, or advances one waiting for backups.
 // Checking and installing block the guard loop while they run (node repair waits;
 // maintenance only starts when all nodes are Ready); waiting for backups does not.
@@ -217,7 +229,14 @@ func (g *Guard) maybeMaintain(ctx context.Context, info *tenant.ClusterInfo, nod
 		g.endRun(ctx, st, "maintenance interrupted (the guard restarted); it runs again at the next window or request")
 	}
 	sched, configured := g.backupSettings(ctx)
-	if !maintenanceDue(st, sched.MaintenanceHour(), time.Now().UTC()) {
+	now := time.Now().UTC()
+	if next := nextMaintenance(st, sched.MaintenanceHour(), now).Format(time.RFC3339); next != st.NextRun && !st.Running {
+		// Written only when it changes: shows (dashboard, tests) that the guard follows
+		// the schedule set in the dashboard, without waiting for the window.
+		st.NextRun = next
+		g.saveMaint(ctx, st)
+	}
+	if !maintenanceDue(st, sched.MaintenanceHour(), now) {
 		return
 	}
 	for _, n := range nodes {
@@ -247,7 +266,7 @@ func (g *Guard) maybeMaintain(ctx context.Context, info *tenant.ClusterInfo, nod
 		g.applyUpdates(ctx, info, nodes, st)
 		return
 	}
-	now := time.Now().UTC()
+	now = time.Now().UTC()
 	req := BackupRequest{RequestedAt: now.Format(time.RFC3339), FreshSince: now.Add(-BackupFreshness).Format(time.RFC3339),
 		Reason: "OS updates waiting on " + strings.Join(pending, ", ")}
 	if err := g.writeBackupRequest(ctx, req); err != nil {

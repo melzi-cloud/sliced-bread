@@ -26,6 +26,7 @@ import (
 	"github.com/melzi-cloud/sliced-bread/internal/config"
 	"github.com/melzi-cloud/sliced-bread/internal/guard"
 	"github.com/melzi-cloud/sliced-bread/internal/labels"
+	"github.com/melzi-cloud/sliced-bread/internal/schedule"
 	"github.com/melzi-cloud/sliced-bread/internal/tenant"
 )
 
@@ -41,10 +42,11 @@ import (
 //  2. With the key fixed, "Run OS maintenance now" backs up every app with data and waits
 //     for the restore tests, installs the update, needrestart restarts the daemon, and the
 //     servers reboot one at a time in the same run.
-//  3. A backup schedule changed in the dashboard is followed.
+//  3. A backup schedule changed in the dashboard reaches sb-control (its next backup slot)
+//     and sb-guard (its next maintenance window). When slots fire is unit-tested with an
+//     injected clock; nothing here waits for a time of day.
 //
-// Run with: make e2e-os-updates (about 1.5 to 2.5 hours, most of it waiting for the next
-// full hour in step 3). SB_RUN=<run-id> reuses a running prototype install (it is kept);
+// Run with: make e2e-os-updates (about 30 minutes). SB_RUN=<run-id> reuses a running prototype install (it is kept);
 // SB_KEEP=1 keeps a new one.
 func TestOSUpdates(t *testing.T) {
 	cfg, err := config.LoadDev()
@@ -350,59 +352,35 @@ func TestOSUpdates(t *testing.T) {
 	})
 
 	// --- 3. the backup schedule set in the dashboard is followed ---
-	last := time.Time{}
-	for _, a := range h.apps() {
-		if a.Backup != nil && a.Backup.LastBackup != nil {
-			if t0, _ := time.Parse(time.RFC3339, a.Backup.LastBackup.StartedAt); t0.After(last) {
-				last = t0
-			}
-		}
-	}
-	slot := last.Truncate(time.Hour).Add(time.Hour)
-	if slot.Hour() == 3 { // the old schedule's own slot proves nothing
-		slot = slot.Add(time.Hour)
-	}
-	if wait := time.Until(slot.Add(90 * time.Second)); wait > 0 {
-		h.step("waiting %s for %s, the next full hour after the last backup", wait.Round(time.Second), slot.Format("15:04"))
-		select {
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		case <-time.After(wait):
-		}
-	}
+	// When a slot fires is pure logic (schedule.LastSlot/NextSlot, backupSlotOpen,
+	// nextMaintenance), unit-tested with an injected clock. Here we check the wiring: a
+	// schedule saved in the dashboard reaches sb-control, which reports the next backup
+	// slot, and sb-guard, which records its next maintenance window. No waiting for a
+	// clock hour.
 	now := time.Now().UTC()
-	slot = now.Truncate(time.Hour)
-	for _, a := range h.apps() {
-		if b := a.Backup; b != nil && b.LastBackup != nil {
-			if t0, _ := time.Parse(time.RFC3339, b.LastBackup.StartedAt); !t0.Before(slot) {
-				t.Errorf("%s was backed up at %s under the old daily 03:00 schedule", a.Name, b.LastBackup.StartedAt)
-			}
-		}
-	}
-	h.step("no backups at %s under the daily 03:00 schedule", slot.Format("15:04"))
-	h.mustPost(d, "/settings/backup-schedule", url.Values{"hour": {fmt.Sprint(slot.Hour())}, "every": {"6"}, "weekday": {"0"}}, "Backups now run every 6 hours")
+	want := schedule.Backup{Hour: (now.Hour() + 2) % 24, Every: 6}
+	h.mustPost(d, "/settings/backup-schedule", url.Values{"hour": {fmt.Sprint(want.Hour)}, "every": {"6"}, "weekday": {"0"}}, "Backups now run every 6 hours")
 	page, err := d.get(ctx, "/settings")
-	if err != nil || !strings.Contains(page, fmt.Sprintf("OS maintenance runs daily at %02d:00 UTC", slot.Hour()%6+1)) {
+	if err != nil || !strings.Contains(page, fmt.Sprintf("OS maintenance runs daily at %02d:00 UTC", want.MaintenanceHour())) {
 		t.Errorf("settings page does not show the new maintenance hour (%v)", err)
 	}
-	h.step("schedule set in the dashboard: every 6 hours from %02d:00 UTC", slot.Hour())
-	h.waitFor("scheduled backups at the new slot", 5*time.Minute, func() (bool, string) {
-		var waiting []string
-		for _, a := range h.apps() {
-			b := a.Backup
-			if b == nil || b.LastBackup == nil || b.LastBackup.Trigger != "schedule" {
-				waiting = append(waiting, a.Name)
-				continue
-			}
-			if t0, _ := time.Parse(time.RFC3339, b.LastBackup.StartedAt); t0.Before(slot) {
-				waiting = append(waiting, a.Name)
-			}
+	h.step("schedule set in the dashboard: %s", want)
+	nextBackup := want.NextSlot(time.Now().UTC()).Format(time.RFC3339)
+	h.waitFor("sb-control to report the next backup under the new schedule", time.Minute, func() (bool, string) {
+		var v struct {
+			Schedule   string `json:"schedule"`
+			NextBackup string `json:"nextBackup"`
 		}
-		return len(waiting) == 0, strings.Join(waiting, ", ")
+		json.Unmarshal([]byte(run("backups", "--json")), &v)
+		return v.NextBackup == nextBackup && strings.HasPrefix(v.Schedule, want.String()), v.Schedule + " next " + v.NextBackup
 	})
-	for _, a := range h.apps() {
-		h.step("%s: scheduled backup started %s", a.Name, a.Backup.LastBackup.StartedAt)
-	}
+	h.step("sb-control: next backup %s", nextBackup)
+	h.waitFor("sb-guard to plan maintenance from the new schedule", time.Minute, func() (bool, string) {
+		m := h.maint()
+		next, err := time.Parse(time.RFC3339, m.NextRun)
+		return err == nil && next.Hour() == want.MaintenanceHour() && next.After(time.Now()), m.NextRun
+	})
+	h.step("sb-guard: next maintenance %s (an hour after the first backup of the day)", h.maint().NextRun)
 }
 
 func teardown(t *testing.T, p *tenant.Provisioner, runID string) {

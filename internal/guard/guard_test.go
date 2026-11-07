@@ -102,3 +102,23 @@ func TestHostScripts(t *testing.T) {
 		t.Error("the test repository's origin is allowed only by the e2e test, never by product code")
 	}
 }
+
+func TestNextMaintenance(t *testing.T) {
+	at := func(v string) time.Time { x, _ := time.Parse(time.RFC3339, v); return x }
+	cases := []struct{ last, now, want string }{
+		{"", "2026-11-07T01:00:00Z", "2026-11-07T04:00:00Z"},
+		{"", "2026-11-07T05:00:00Z", "2026-11-07T04:00:00Z"},                     // window still open, not run
+		{"2026-11-07T04:00:05Z", "2026-11-07T05:00:00Z", "2026-11-08T04:00:00Z"}, // ran today
+		{"", "2026-11-07T06:30:00Z", "2026-11-08T04:00:00Z"},                     // window missed
+	}
+	for i, c := range cases {
+		st := &MaintState{LastRun: c.last}
+		if got := nextMaintenance(st, 4, at(c.now)); !got.Equal(at(c.want)) {
+			t.Errorf("case %d: %s, want %s", i, got, c.want)
+		}
+		// The window it names is the one maintenanceDue opens.
+		if w := nextMaintenance(st, 4, at(c.now)); !maintenanceDue(st, 4, w.Add(time.Minute)) {
+			t.Errorf("case %d: not due at %s", i, w)
+		}
+	}
+}

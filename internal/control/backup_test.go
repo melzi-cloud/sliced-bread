@@ -73,6 +73,12 @@ func TestBackupSlotOpen(t *testing.T) {
 		{sixHours, backedUp("2026-11-07T03:00:20Z", "succeeded"), "2026-11-07T09:00:10Z", true},
 		{sixHours, backedUp("2026-11-07T09:00:20Z", "failed"), "2026-11-07T09:30:00Z", false},
 		{sixHours, backedUp("2026-11-07T09:00:20Z", "failed"), "2026-11-07T10:01:00Z", true},
+		// The schedule is changed in the dashboard: daily 03:00 -> every 6 h from 20:00. The
+		// 14:00 slot of the new schedule has not run yet, so a backup is due at once.
+		{&BackupConfig{Hour: 20, Every: 6}, backedUp("2026-11-07T03:00:20Z", "succeeded"), "2026-11-07T15:00:00Z", true},
+		// Weekly on Sunday 02:00; a backup on Sunday 02:00 covers the whole week.
+		{&BackupConfig{Hour: 2, Every: 168, Weekday: 0}, backedUp("2026-11-08T02:00:30Z", "succeeded"), "2026-11-14T23:00:00Z", false},
+		{&BackupConfig{Hour: 2, Every: 168, Weekday: 0}, backedUp("2026-11-08T02:00:30Z", "succeeded"), "2026-11-15T02:00:10Z", true},
 	}
 	for i, c := range cases {
 		if got := backupSlotOpen(c.a, c.c, at(c.now)); got != c.want {

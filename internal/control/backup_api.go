@@ -20,6 +20,7 @@ type BackupsView struct {
 	Configured bool              `json:"configured"`
 	Target     string            `json:"target,omitempty"` // s3 endpoint/bucket/prefix, no keys
 	Schedule   string            `json:"schedule,omitempty"`
+	NextBackup string            `json:"nextBackup,omitempty"` // next scheduled slot (UTC)
 	Apps       []AppBackupStatus `json:"apps"`
 	Hint       string            `json:"hint,omitempty"`
 }
@@ -43,6 +44,7 @@ func (s *Server) apiBackups(w http.ResponseWriter, r *http.Request) {
 	if c != nil {
 		v.Target = strings.TrimPrefix(c.Repository(), "s3:")
 		v.Schedule = c.Schedule().String() + ", each backup followed by a restore test; keeps the last 10 snapshots plus 14 daily and 8 weekly"
+		v.NextBackup = c.Schedule().NextSlot(time.Now()).Format(time.RFC3339)
 	} else {
 		v.Hint = "configure with: sb backups configure --endpoint https://... --bucket <bucket> (admin token)"
 	}
