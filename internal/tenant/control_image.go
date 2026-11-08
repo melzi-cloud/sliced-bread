@@ -27,6 +27,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
 	"github.com/melzi-cloud/sliced-bread/internal/controlbin"
+	"github.com/melzi-cloud/sliced-bread/internal/release"
+	"github.com/melzi-cloud/sliced-bread/internal/version"
 )
 
 const controlBase = "gcr.io/distroless/static-debian12:nonroot"
@@ -38,7 +40,16 @@ func ControlBinary(ctx context.Context, repoRoot string) ([]byte, error) {
 		if b, ok := controlbin.Binary(); ok {
 			return b, nil
 		}
-		return nil, fmt.Errorf("this sb build has no embedded sb-control; build it with `make build` or run from the repository")
+		// A `go install`ed sb has no sb-control built in: use the one published with the
+		// same release, checked against its signed checksums.
+		if v := version.Get(); release.IsRelease(v) {
+			b, err := release.Fetch(ctx, v, release.ControlAsset)
+			if err != nil {
+				return nil, fmt.Errorf("download sb-control %s: %w", v, err)
+			}
+			return b, nil
+		}
+		return nil, fmt.Errorf("this sb build has no sb-control: install a release (see the README), or build with `make build`")
 	}
 	out := filepath.Join(repoRoot, ".sb", "build", "sb-control")
 	if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {

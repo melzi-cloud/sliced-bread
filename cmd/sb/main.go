@@ -3,7 +3,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
+
+	"github.com/melzi-cloud/sliced-bread/internal/version"
 )
 
 func main() {
@@ -22,6 +25,9 @@ func main() {
 			os.Exit(handleExit(runSSH(args[1:])))
 		case "setup-link":
 			os.Exit(handleExit(runSetupLink(args[1:])))
+		case "version", "--version", "-v":
+			fmt.Println("sb", version.Get())
+			return
 		}
 	}
 	os.Exit(handleExit(runUser(args)))

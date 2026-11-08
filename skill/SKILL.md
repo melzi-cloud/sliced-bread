@@ -212,14 +212,20 @@ The install patches itself: every night, after a fresh backup and restore test o
 
 ## Installing
 
-Only when the user asks for a new install. It runs from the user's machine against their own Hetzner account and Cloudflare domain:
+Only when the user asks for a new install. It runs from the user's machine against their own Hetzner account and Cloudflare domain. If `sb` is missing, install it (`sb version` shows the installed version):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/melzi-cloud/sliced-bread/main/install.sh | sh
+```
+
+Then ask the user to run this in their own terminal (it asks for the Hetzner and Cloudflare tokens, and S3 keys with `--backup-bucket`, without echoing them, so the tokens never pass through you):
 
 ```sh
 sb init --domain apps.example.com --size 1 \
   [--backup-endpoint https://<s3 endpoint> --backup-bucket <bucket>]
 ```
 
-Secrets come from environment variables, never flags: `HCLOUD_TOKEN`, `CLOUDFLARE_API_TOKEN` (or `CF_API_TOKEN`), and for backups `SB_BACKUP_ACCESS_KEY_ID` and `SB_BACKUP_SECRET_ACCESS_KEY`. Never print them. `--size 1` is one server (about EUR 7/month, no high availability), `--size 3` is three servers and a load balancer (about EUR 29/month). It takes 5 to 10 minutes. At the end it prints two things only the human should handle: a one-time **setup link** (the user opens it and creates the owner account) and the **backup encryption password** (the user saves it in their password manager; do not repeat it, store it or put it anywhere else). Tell the user to do both. The CLI is then logged in with an agent token, which is all you need; everything admin happens in the dashboard. `sb setup-link <install-id>` prints a fresh setup link if the first one expired; `sb destroy <install-id>` removes everything.
+For a scripted install the tokens come from environment variables, never flags: `HCLOUD_TOKEN`, `CLOUDFLARE_API_TOKEN` (or `CF_API_TOKEN`), and for backups `SB_BACKUP_ACCESS_KEY_ID` and `SB_BACKUP_SECRET_ACCESS_KEY`. Never print them. `--size 1` is one server (about EUR 7/month, no high availability), `--size 3` is three servers and a load balancer (about EUR 29/month). It takes 5 to 10 minutes. At the end it prints two things only the human should handle: a one-time **setup link** (the user opens it and creates the owner account) and the **backup encryption password** (the user saves it in their password manager; do not repeat it, store it or put it anywhere else). Tell the user to do both. The CLI is then logged in with an agent token, which is all you need; everything admin happens in the dashboard. `sb setup-link <install-id>` prints a fresh setup link if the first one expired; `sb destroy <install-id>` removes everything.
 
 ## Troubleshooting
 

@@ -1,0 +1,49 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: test
+        run: go vet ./... && go test -count=1 ./...
+      - name: build
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -eu
+          LD="-s -w -X github.com/melzi-cloud/sliced-bread/internal/version.Version=$VERSION"
+          mkdir -p dist
+          # sb-control (linux/amd64, the servers) is built into every sb and published on
+          # its own for `go install`ed sb.
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$LD" -o internal/controlbin/payload/sb-control ./cmd/sb-control
+          cp internal/controlbin/payload/sb-control dist/sb-control-linux-amd64
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            os=${target%/*}; arch=${target#*/}
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags="$LD" -o "dist/sb-$os-$arch" ./cmd/sb
+          done
+          cd dist && sha256sum sb-* > SHA256SUMS && cat SHA256SUMS
+      - name: sign
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: go run ./hack/release sign dist/SHA256SUMS
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes "Install or update the CLI: curl -fsSL https://raw.githubusercontent.com/melzi-cloud/sliced-bread/main/install.sh | sh
+
+          Every binary is listed in SHA256SUMS, signed with the SlicedBread release key (minisign, key ID AC554503E19510D6):
+          RWTWEJXhA0VVrEhLJXOwGwqCydkC64znIxzL3NqduaYT7UBbvePx9L0i"

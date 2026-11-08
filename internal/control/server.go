@@ -18,6 +18,7 @@ import (
 	"github.com/melzi-cloud/sliced-bread/internal/apps"
 	"github.com/melzi-cloud/sliced-bread/internal/kube"
 	"github.com/melzi-cloud/sliced-bread/internal/lease"
+	"github.com/melzi-cloud/sliced-bread/internal/version"
 )
 
 // Config comes from environment variables set by the platform manifests.
@@ -164,7 +165,7 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		srv.Shutdown(sctx)
 	}()
-	s.logf("sb-control listening on %s for %s", s.cfg.Listen, s.cfg.Domain)
+	s.logf("sb-control %s listening on %s for %s", version.Get(), s.cfg.Listen, s.cfg.Domain)
 	err := srv.ListenAndServe()
 	if err == http.ErrServerClosed {
 		return nil

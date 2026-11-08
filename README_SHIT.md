@@ -8,17 +8,22 @@ Run off-the-shelf software and AI-built apps on your own Hetzner servers, privat
 
 You need a Hetzner Cloud project, a domain on Cloudflare, and optionally an S3-compatible bucket for backups (Cloudflare R2, Hetzner Object Storage, or any S3 service), ideally in a different location from your servers.
 
+Install the CLI (macOS or Linux, Intel or ARM; installs `sb` to `~/.local/bin`, checked against the release's signed checksums):
+
 ```sh
-make build                                    # in a clone of this repository: bin/sb, with the control plane built in
+curl -fsSL https://raw.githubusercontent.com/melzi-cloud/sliced-bread/main/install.sh | sh
+```
 
-export HCLOUD_TOKEN=...                       # Hetzner: read and write token. Use a dedicated project.
-export CLOUDFLARE_API_TOKEN=...               # Cloudflare: Zone / DNS / Edit on the zone below (CF_API_TOKEN also works)
-export SB_BACKUP_ACCESS_KEY_ID=...            # optional: S3 keys for backups
-export SB_BACKUP_SECRET_ACCESS_KEY=...
+or, with Go: `go install github.com/melzi-cloud/sliced-bread/cmd/sb@latest` (that build downloads the matching control plane from the release when you run `sb init`).
 
-bin/sb init --domain apps.example.com --size 1 \
+Then create the install:
+
+```sh
+sb init --domain apps.example.com --size 1 \
   --backup-endpoint https://<account>.r2.cloudflarestorage.com --backup-bucket my-backups
 ```
+
+`sb init` asks for the Hetzner token (read and write, use a dedicated project), the Cloudflare token (Zone / DNS / Edit on the zone that holds the domain) and, with `--backup-bucket`, the S3 keys, without echoing them. For scripted installs set `HCLOUD_TOKEN`, `CLOUDFLARE_API_TOKEN` (or `CF_API_TOKEN`), `SB_BACKUP_ACCESS_KEY_ID` and `SB_BACKUP_SECRET_ACCESS_KEY` instead. The backup flags are optional: you can also set up backups later in the dashboard.
 
 `sb init` runs from your machine and takes 5 to 10 minutes. It creates the servers, firewall, DNS records, a wildcard certificate from Let's Encrypt and the control plane. At the end it prints:
 
@@ -30,11 +35,11 @@ bin/sb init --domain apps.example.com --size 1 \
 Then:
 
 ```sh
-bin/sb deploy vault --template vaultwarden && bin/sb wait vault
-bin/sb deploy myapp --dir ~/code/my-lovable-export && bin/sb wait myapp
-bin/sb deploy analytics --template umami && bin/sb wait analytics
-bin/sb action analytics create_website --input name=MyApp --input domain=myapp.apps.example.com
-bin/sb backups
+sb deploy vault --template vaultwarden && sb wait vault
+sb deploy myapp --dir ~/code/my-lovable-export && sb wait myapp
+sb deploy analytics --template umami && sb wait analytics
+sb action analytics create_website --input name=MyApp --input domain=myapp.apps.example.com
+sb backups
 ```
 
 To let a coding agent operate it, give it [skill/SKILL.md](skill/SKILL.md). On the machine that ran `sb init` it can use the CLI as is; elsewhere it runs `sb login --api https://api.apps.example.com` and you approve that login in the dashboard. No CLI token can approve, change settings or see secrets. For automation such as CI, an admin can create an expiring admin token on the dashboard's Settings page.

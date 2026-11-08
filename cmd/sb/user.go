@@ -39,6 +39,7 @@ Install (on your own Hetzner account; run by a human)
   sb setup-link <install-id>          a new one-time link to create the owner account
   sb installs                         installs created from this machine
   sb upgrade <install-id>             roll out the control plane built into this sb
+  sb version                          the version of this sb
   sb ssh <install-id> [node]          print an SSH command for a node (host key pinned)
   sb destroy <install-id>             delete an install and all its data
 
