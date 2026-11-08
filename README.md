@@ -1,108 +1,77 @@
 # SlicedBread
 
-Run off-the-shelf software and AI-built apps on your own Hetzner servers, private by default, with backups that are restored and checked after every run. Built to be operated by the coding agent you already use.
+Making self-hosting just a bit easier.
 
-> Status: pre-release. Works end to end on Hetzner Cloud with a Cloudflare-managed domain. Not production ready: read the [threat model](docs/threat-model.md) and the known gaps below first.
+---
+
+I've been self-hosting for 7 years. Over the years, I've gone from nginx static sites -> to manual GNU screen background processes -> Docker -> Compose -> Kubernetes. It has always annoyed me how much work it was to get things set up, and then maintain it.
+
+This project is an attempt at an automated opinionated setup that "just works".
+
+## What it does right now
+
+Takes a Hetzner project and automatically spins up a lightweight Kubernetes cluster (k3s) with some niceties built in:
+
+- Automatic backups (and automatic restore tests to make sure they work)
+- Automatic security updates & restart with minimal downtime
+- Wildcard DNS certificate & DNS record via Cloudflare
+- Configurable global auth wall
+- Deployment templates for open source software
+- A CLI & skill files for agents to manage deployments
+
+Requirements: Hetzner account, Domain in Cloudflare
+
+Optional: S3 Bucket (anywhere)
+
+[Jump to quickstart](#quickstart)
+
+## WIP
+
+- Don't require Hetzner. Allow users to provide list of hosts & ssh key.
+- Allow other DNS providers via something like RFC 2136
+- Database replication
+- Automatic image updates
+- Track resource usage and autoscale with cap.
+- Rollback bad OS update
+- Automatic pull and build images from GitHub (CI)
+
+## A bit more implementation detail & why
+
+### Kubernetes (k3s)
+
+Your first reaction might be "wtf, complexity, go away". Mine too. But every setup I've run
+eventually grew a worse, hand-rolled version of the same features:
+
+- **Where does this go?** With 5 machines, I shouldn't be the one checking which has room.
+- **Does it come back after a reboot?** No more writing a systemd unit per service.
+- **Where is its config?** Not scattered across `/etc`, a compose file and some anonymous volume.
+- **What if a machine dies?** Its workloads move to the others.
+- **What if it needs more?** Stateless things replicate and load-balance across machines.
+
+And everything else: Health checks, self-healing, resource limits, and draining a server before a restart.
+
+### Authentication
+
+Annoyingly, a bunch of very useful things don't come with auth. This just allows you to configure a global authentication wall without putting a bunch of basic auth entries and hashes in your Caddy config.
+
+### Backups
+
+Volume, config, environment, and everything else goes in an encrypted backup on S3. Backups are meant to be off-site and reliable, and so they're encrypted so you can use an untrusted provider rather than try to self-host minio elsewhere.
+
+Backups are actually tested with restores after they finish on a temporary namespace to make sure they're working. A backup untested is barely better than not having one.
+
+### Automatic updates
+
+No more `ssh` -> `sudo apt upgrade`. This is another reason for Kubernetes. We can just upgrade and restart (when kernel updates) without worrying about how long it takes to come back up. The apps and volumes would've already moved to another node.
+
+### Templates
+
+Not a lot of them for now, but the goal is to be able to reuse the efforts of others so getting something hosted becomes a click rather than a process.
+
+### CLI
+
+For AI agents. They're limited from destructive or dangerous actions like deleting resources, making things public, etc. You get a link to approve them from the dashboard.
 
 ## Quickstart
 
-You need a Hetzner Cloud project, a domain on Cloudflare, and optionally an S3-compatible bucket for backups (Cloudflare R2, Hetzner Object Storage, or any S3 service), ideally in a different location from your servers.
-
-```sh
-make build                                    # in a clone of this repository: bin/sb, with the control plane built in
-
-export HCLOUD_TOKEN=...                       # Hetzner: read and write token. Use a dedicated project.
-export CLOUDFLARE_API_TOKEN=...               # Cloudflare: Zone / DNS / Edit on the zone below (CF_API_TOKEN also works)
-export SB_BACKUP_ACCESS_KEY_ID=...            # optional: S3 keys for backups
-export SB_BACKUP_SECRET_ACCESS_KEY=...
-
-bin/sb init --domain apps.example.com --size 1 \
-  --backup-endpoint https://<account>.r2.cloudflarestorage.com --backup-bucket my-backups
-```
-
-`sb init` runs from your machine and takes 5 to 10 minutes. It creates the servers, firewall, DNS records, a wildcard certificate from Let's Encrypt and the control plane. At the end it prints:
-
-1. **A one-time setup link.** Open it and create your owner account (email and password). Your email also sets up ZeroSSL as a fallback certificate authority. If the link expires, `sb setup-link <install>` prints a new one.
-2. **The backup encryption password.** Save it in your password manager. Backups are encrypted with it, and if the servers are ever lost it is the only way to read them. It is not stored on your machine.
-
-**Humans use the dashboard, agents use the CLI.** The dashboard at `https://auth.apps.example.com` is where you approve what agents ask for, invite teammates, set up backups, restore, configure alerts and export. The CLI is left logged in with an agent token: deploys and configuration go through, but making apps public, deleting and restoring wait for your approval, so you and your coding agent can safely share it.
-
-Then:
-
-```sh
-bin/sb deploy vault --template vaultwarden && bin/sb wait vault
-bin/sb deploy myapp --dir ~/code/my-lovable-export && bin/sb wait myapp
-bin/sb deploy analytics --template umami && bin/sb wait analytics
-bin/sb action analytics create_website --input name=MyApp --input domain=myapp.apps.example.com
-bin/sb backups
-```
-
-To let a coding agent operate it, give it [skill/SKILL.md](skill/SKILL.md). On the machine that ran `sb init` it can use the CLI as is; elsewhere it runs `sb login --api https://api.apps.example.com` and you approve that login in the dashboard. No CLI token can approve, change settings or see secrets. For automation such as CI, an admin can create an expiring admin token on the dashboard's Settings page.
-
-**Losing the whole install.** Every app is backed up, including apps without data (their snapshot holds settings, secret values and uploaded source). To rebuild elsewhere, run `sb init` with `SB_BACKUP_PASSWORD` set to the saved password and the same backup bucket and prefix, finish setup, then on the dashboard's Settings page use "Look in the backup repository" and "Recreate all". Use the same domain if you can: references like `${apps.analytics.url}` are recomputed, but URLs written into an app's own source (for example a tracking snippet) still point at the old domain until the app is redeployed with new ones.
-
-Other commands: `sb installs`, `sb upgrade <install>`, `sb setup-link <install>`, `sb ssh <install>` (SSH is only open to the IP address `sb init` ran from), `sb destroy <install>`.
-
-## Sizes and cost
-
-Hetzner prices in nbg1 including VAT, checked 2026-11-06 (cx23: 2 vCPU, 4 GB RAM, 40 GB disk).
-
-| Size | What you get | About |
-|---|---|---|
-| `--size 1` | 1 server, ports 80/443 open on it. App data on Hetzner volumes (they survive the server, but nothing moves them). No high availability: if the server fails, apps are down until it is back or restored from backup, and the nightly OS reboot takes apps down for a minute or two. | EUR 7/month |
-| `--size 3` | 3 servers in a spread placement group (different physical hosts), a load balancer, embedded etcd that survives losing one server, two copies of the login wall. A dead server is replaced automatically (in the node-loss test the login wall was back after 21 seconds, apps with data within about 3.5 minutes, and a new server had joined after about 2.5); OS reboots happen one server at a time without downtime for apps without a volume. | EUR 29/month |
-| per app with data | each volume or database is a 10 GB Hetzner volume | EUR 0.77/month |
-
-Backup storage is billed by your S3 provider. Restic deduplicates and compresses, so small apps use little space.
-
-## What it does today
-
-- **Deploy anything:** a catalog template (Vaultwarden, Umami; templates are data in the public [bakery](https://github.com/melzi-cloud/bakery) repository and reach your install as a signed catalog, can have several components, config files and scripted actions, and agents can write new ones), any container image, a public git repo, or a local directory such as a Lovable export, built in the cluster with Railpack or its Dockerfile.
-- **Your team, your rules:** invite teammates as members or admins on the dashboard. Members get past the login wall; whether they can also approve risky changes is an admin setting (off by default).
-- **Private by default:** every app sits behind a login wall unless you say otherwise. Apps with their own clients (Vaultwarden) opt out, keeping sensitive paths such as account registration behind the wall. Agents never see secret values: the server generates random secrets, and you type the others into the dashboard. Session cookies are host-only and never reach apps.
-- **Backups that are proven:** daily restic backups of volumes and Postgres to your bucket, each followed by a restore test into a scratch namespace: restic verifies every restored file's content, the file count must match, required files must be present, SQLite databases the template declares must pass SQLite's integrity check (Vaultwarden's, with its account and item counts reported), and a database dump must load into a fresh Postgres with the same tables. `sb restore` replaces an app's data with a snapshot, and `sb restore <app> --recreate` brings back a deleted app (spec, secrets, source and data) from the bucket alone.
-- **Tells you when something breaks:** failed backups or restore tests, apps that stay down, certificates that don't renew and servers that disappear show on the dashboard and in `sb alerts`, and can be posted to a webhook (Slack, Discord, ntfy or JSON) when they open and when they clear.
-- **Maintains itself:** every night, an hour after the first backup of the day, Debian security updates install one server at a time, but only after every app with data has a backup from the last 3 hours that passed its restore test (missing backups run first; a failed one postpones the updates and raises an alert). Services that still use replaced libraries are restarted (needrestart), and a server that needs a reboot, for example for a kernel fix, is rebooted the same night after its apps have moved: apps without a volume keep serving, apps with a volume pause for under a minute. The backup schedule (every 6, 12 or 24 hours, or weekly) is set on the dashboard. Newer upstream versions of template images are reported (not applied). On 3 servers, a server that dies is fenced and replaced by a new one with no manual steps.
-- **Agent-friendly:** a CLI with JSON output and documented exit codes, a skill file, and human approvals for anything that widens exposure, deletes or restores.
-- **Your account, your keys:** certificates are issued and kept inside your cluster, and traffic never passes through us. The dashboard exports every app as plain Kubernetes manifests.
-
-## Known gaps
-
-- Image updates are reported, not applied; no automatic rollback of a bad update yet.
-- Apps with a volume or database (one Postgres instance per app) pause for about a minute when their server reboots or dies, while the volume moves.
-- Kubernetes (k3s) itself is not upgraded automatically yet.
-- Alerts go to the dashboard, `sb alerts` and one webhook (JSON, Slack, Discord or ntfy). No email yet.
-- Apps run as root inside their containers (capabilities reduced, privilege escalation off).
-- The in-cluster image registry has no login. App pods cannot reach it (network policy) and apps run images by digest, but build pods can push to it.
-- Login is email and password. Teammates join through invite links you send yourself (no email sending, no GitHub sign-in yet).
-- A restore test checks that data is intact and loads (file contents, SQLite integrity, Postgres tables), not that the app starts on it.
-- Hetzner and Cloudflare only.
-
-## Recovery, measured
-
-`make e2e-node-loss` powers off, through the Hetzner API, the server running Vaultwarden on a 3-server install with Vaultwarden and Umami in use. Each check runs on its own every second (Umami every 5 seconds); "back" is the start of the final unbroken run of successes. In the latest run (2026-11-07) that server also ran Umami's database, the database operator, one of the two control-plane replicas and the active guard:
-
-| | Back after |
-|---|---|
-| Dashboard and login wall | 21 s |
-| Replacement server joined | 2 min 32 s |
-| Vaultwarden | 2 min 58 s |
-| Umami (through its database) | 3 min 24 s |
-
-No data was lost, including a Vaultwarden account created seconds before the power-off. The login wall comes back as soon as the standby guard has fenced the dead server (D-031). Apps with a volume take longer because Hetzner moves the volume only once the dead server is deleted.
-
-## Docs
-
-- [Threat model](docs/threat-model.md)
-- [Architecture](docs/architecture.md)
-- [Hosting modes and TLS](docs/hosting-modes.md)
-- [App spec](docs/app-spec.md)
-- [Technical decisions](docs/decisions.md)
-- [Roadmap and acceptance tests](docs/roadmap.md)
-- [TODO](docs/todo.md)
-- [Development and testing](docs/development.md)
-- [Agent skill file](skill/SKILL.md)
-
-## License
-
-[AGPL-3.0](LICENSE)
+[TODO]
